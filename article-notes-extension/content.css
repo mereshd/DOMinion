@@ -1,18 +1,45 @@
 /* ArticleNotes — Inline highlight styles (injected into page DOM) */
 
 mark.an-highlight {
-  background: transparent;
   cursor: pointer;
   position: relative;
-  border-radius: 2px;
-  transition: background-color 0.2s ease;
-  padding: 1px 0;
-}
-mark.an-highlight:hover {
-  background-color: rgba(0, 0, 0, 0.04);
+  border-radius: 4px;
+  padding: 1px 2px;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-mark.an-type-fact-check { border-bottom: 2px solid #f59e0b; }
-mark.an-type-jargon     { border-bottom: 2px solid #3b82f6; }
-mark.an-type-source      { border-bottom: 2px solid #10b981; }
-mark.an-type-context     { border-bottom: 2px solid #8b5cf6; }
+mark.an-type-fact-check {
+  background-color: rgba(245, 158, 11, 0.18);
+  border-bottom: 2px solid rgba(245, 158, 11, 0.6);
+}
+mark.an-type-fact-check:hover {
+  background-color: rgba(245, 158, 11, 0.30);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+}
+
+mark.an-type-jargon {
+  background-color: rgba(59, 130, 246, 0.18);
+  border-bottom: 2px solid rgba(59, 130, 246, 0.6);
+}
+mark.an-type-jargon:hover {
+  background-color: rgba(59, 130, 246, 0.30);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+mark.an-type-source {
+  background-color: rgba(16, 185, 129, 0.18);
+  border-bottom: 2px solid rgba(16, 185, 129, 0.6);
+}
+mark.an-type-source:hover {
+  background-color: rgba(16, 185, 129, 0.30);
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.15);
+}
+
+mark.an-type-context {
+  background-color: rgba(139, 92, 246, 0.18);
+  border-bottom: 2px solid rgba(139, 92, 246, 0.6);
+}
+mark.an-type-context:hover {
+  background-color: rgba(139, 92, 246, 0.30);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
+}

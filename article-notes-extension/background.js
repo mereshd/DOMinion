@@ -1,7 +1,7 @@
 // ArticleNotes Background Service Worker
 // Handles Gemini API: article analysis + annotation chat
 
-const GEMINI_MODEL = 'gemini-3.1-pro-preview';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const ANALYSIS_PROMPT = `Analyze the following article and identify 5-15 sections that need annotation. Use Google Search to verify claims and find additional context.
@@ -31,24 +31,49 @@ ARTICLE TITLE: {title}
 ARTICLE CONTENT:
 {content}`;
 
+const SELECTION_PROMPT = `The user selected text from an article and wants a "{type}" analysis. Use Google Search to research your answer.
+
+Analysis types:
+- "fact-check": Verify this claim. State whether it's accurate, misleading, partially true, or unverifiable. Cite sources.
+- "jargon": Explain the term or concept in plain language with relevant context.
+- "source": Analyze any sources, references, or claims for credibility and relevance.
+- "context": Provide missing context, historical background, or alternative perspectives.
+
+SELECTED TEXT: "{selection}"
+
+ARTICLE TITLE: {title}
+
+SURROUNDING ARTICLE CONTENT (for context):
+{content}
+
+Return ONLY a valid JSON object:
+{"title":"Short label (3-8 words)","explanation":"Detailed, well-researched explanation (2-4 sentences)."}`;
+
 const CHAT_SYSTEM_PROMPT = `You are ArticleNotes, an AI research assistant. The user wants to discuss a specific annotated section of an article.
 
 Use Google Search to find additional information when helpful. Be concise but thorough. Use markdown formatting.
+
+FULL ARTICLE TITLE: {title}
+
+FULL ARTICLE CONTENT:
+{content}
 
 ANNOTATION CONTEXT:
 Type: {type}
 Original quote: "{quote}"
 Your analysis: {explanation}
+`;
 
-FULL ARTICLE TITLE: {title}
-
-FULL ARTICLE CONTENT:
-{content}`;
-
-// Non-streaming analysis
+// Non-streaming analysis + selection analysis
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'analyze') {
     handleAnalysis(message)
+      .then(sendResponse)
+      .catch(error => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message.action === 'analyzeSelection') {
+    handleSelectionAnalysis(message)
       .then(sendResponse)
       .catch(error => sendResponse({ error: error.message }));
     return true;
@@ -136,6 +161,108 @@ async function handleAnalysis({ apiKey, articleContent, articleTitle }) {
     console.error('Analysis error:', error);
     return { error: `Failed to analyze article: ${error.message}` };
   }
+}
+
+async function handleSelectionAnalysis({ apiKey, selectedText, annotationType, articleContent, articleTitle }) {
+  if (!apiKey) return { error: 'API key not provided' };
+  if (!selectedText) return { error: 'No text selected' };
+
+  try {
+    const prompt = SELECTION_PROMPT
+      .replace('{type}', annotationType)
+      .replace('{selection}', selectedText)
+      .replace('{title}', articleTitle)
+      .replace('{content}', articleContent);
+
+    const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 4096,
+          topP: 0.95,
+          topK: 40,
+          thinkingConfig: { thinkingLevel: "HIGH" }
+        },
+        tools: [{ googleSearch: {} }],
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { error: errorData.error?.message || `API error: ${response.status}` };
+    }
+
+    const data = await response.json();
+
+    if (data.candidates?.[0]?.finishReason === 'SAFETY') {
+      return { error: 'Response was blocked due to safety filters.' };
+    }
+
+    const parts = data.candidates?.[0]?.content?.parts;
+    if (!parts) return { error: 'No response generated.' };
+
+    let responseText = '';
+    for (const part of parts) {
+      if (part.thought) continue;
+      if (part.text) responseText += part.text;
+    }
+
+    if (!responseText) return { error: 'No response generated.' };
+
+    const parsed = extractJSONObject(responseText);
+    if (!parsed || !parsed.title || !parsed.explanation) {
+      return { error: 'Failed to parse AI response.' };
+    }
+
+    return {
+      annotation: {
+        quote: selectedText,
+        type: annotationType,
+        title: parsed.title,
+        explanation: parsed.explanation
+      }
+    };
+
+  } catch (error) {
+    console.error('Selection analysis error:', error);
+    return { error: `Failed to analyze selection: ${error.message}` };
+  }
+}
+
+function extractJSONObject(text) {
+  try {
+    const parsed = JSON.parse(text.trim());
+    if (typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch {}
+
+  const codeBlock = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (codeBlock) {
+    try {
+      const parsed = JSON.parse(codeBlock[1].trim());
+      if (typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+
+  const objMatch = text.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try {
+      const parsed = JSON.parse(objMatch[0]);
+      if (typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+
+  return null;
 }
 
 function extractJSON(text) {

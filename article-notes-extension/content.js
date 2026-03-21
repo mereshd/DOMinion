@@ -32,6 +32,11 @@
   // Tooltip
   let tooltipHideTimer = null;
 
+  // Selection context menu
+  let selectionMenuEl = null;
+  let savedSelectionRange = null;
+  let isSelectionAnalyzing = false;
+
   // Chat
   let currentChatAnnotation = null;
   let chatConversationHistory = [];
@@ -314,10 +319,23 @@
     chatPanelEl.className = 'an-chat-panel';
     overlayShadow.appendChild(chatPanelEl);
 
+    selectionMenuEl = document.createElement('div');
+    selectionMenuEl.className = 'an-selection-menu';
+    overlayShadow.appendChild(selectionMenuEl);
+
     document.body.appendChild(overlayContainer);
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeChat();
+      if (e.key === 'Escape') {
+        closeChat();
+        hideSelectionMenu();
+      }
+    });
+
+    document.addEventListener('mouseup', handleTextSelection);
+    document.addEventListener('mousedown', (e) => {
+      if (e.target === overlayContainer) return;
+      hideSelectionMenu();
     });
   }
 
@@ -587,6 +605,130 @@
   }
 
   // ============================================================
+  // Selection Context Menu
+  // ============================================================
+  function handleTextSelection(e) {
+    if (e.target === overlayContainer) return;
+    if (isSelectionAnalyzing) return;
+
+    setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.toString().trim().length < 5) {
+        return;
+      }
+
+      savedSelectionRange = selection.getRangeAt(0).cloneRange();
+      showSelectionMenu(selection);
+    }, 10);
+  }
+
+  function showSelectionMenu(selection) {
+    if (!selectionMenuEl || !overlayContainer) {
+      if (!overlayContainer) createOverlay();
+    }
+
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+
+    const buttons = Object.entries(ANNOTATION_META).map(([type, meta]) =>
+      '<button class="an-sel-btn" data-type="' + type + '" style="--btn-color: ' + meta.color + '">' +
+        '<span class="an-sel-icon">' + meta.icon + '</span>' +
+        '<span class="an-sel-label">' + meta.label + '</span>' +
+      '</button>'
+    ).join('');
+
+    selectionMenuEl.innerHTML =
+      '<div class="an-selection-menu-inner">' + buttons + '</div>';
+
+    selectionMenuEl.className = 'an-selection-menu an-visible';
+
+    requestAnimationFrame(() => {
+      const menuRect = selectionMenuEl.getBoundingClientRect();
+      let top = rect.top - menuRect.height - 8;
+      let left = rect.left + (rect.width / 2) - (menuRect.width / 2);
+
+      if (top < 8) top = rect.bottom + 8;
+      if (left < 8) left = 8;
+      if (left + menuRect.width > window.innerWidth - 8) {
+        left = window.innerWidth - menuRect.width - 8;
+      }
+
+      selectionMenuEl.style.left = left + 'px';
+      selectionMenuEl.style.top = top + 'px';
+    });
+
+    selectionMenuEl.querySelectorAll('.an-sel-btn').forEach(btn => {
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => {
+        const type = btn.dataset.type;
+        hideSelectionMenu();
+        analyzeSelection(type);
+      });
+    });
+  }
+
+  function hideSelectionMenu() {
+    if (selectionMenuEl) selectionMenuEl.className = 'an-selection-menu';
+  }
+
+  async function analyzeSelection(annotationType) {
+    if (!savedSelectionRange || isSelectionAnalyzing) return;
+    isSelectionAnalyzing = true;
+
+    const selectedText = savedSelectionRange.toString().trim();
+    const range = savedSelectionRange;
+
+    if (!overlayContainer) createOverlay();
+    if (!articleContent) articleContent = extractArticleContent();
+
+    showStatus('Analyzing selection\u2026');
+
+    try {
+      const result = await chrome.storage.sync.get(['geminiApiKey']);
+      if (!result.geminiApiKey) {
+        showStatus('Please set your API key in the extension popup.', true);
+        isSelectionAnalyzing = false;
+        return;
+      }
+
+      const response = await chrome.runtime.sendMessage({
+        action: 'analyzeSelection',
+        apiKey: result.geminiApiKey,
+        selectedText: selectedText,
+        annotationType: annotationType,
+        articleContent: articleContent.markdown,
+        articleTitle: articleContent.title
+      });
+
+      if (response.error) {
+        showStatus('Error: ' + response.error, true);
+        isSelectionAnalyzing = false;
+        return;
+      }
+
+      const annotation = response.annotation;
+      const idx = annotations.length;
+      annotations.push(annotation);
+
+      const mark = wrapRangeWithHighlight(range, idx, annotation.type);
+      if (mark) {
+        highlightElements.push(mark);
+        attachHighlightListeners(mark, idx);
+        showStatus('\u2713 Annotation added', false, 2500);
+        showTooltip(annotation, mark);
+      } else {
+        showStatus('Could not highlight the selection', true);
+      }
+
+    } catch (error) {
+      showStatus('Error: ' + error.message, true);
+    }
+
+    savedSelectionRange = null;
+    isSelectionAnalyzing = false;
+  }
+
+  // ============================================================
   // Utilities
   // ============================================================
   function escapeHtml(text) {
@@ -690,7 +832,7 @@
       .an-tooltip-inner {
         background: #fff;
         border-radius: 12px;
-        box-shadow: 0 12px 40px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+        box-shadow: 0 16px 48px rgba(0,0,0,0.22), 0 0 0 1px rgba(0,0,0,0.08);
         max-width: 380px;
         min-width: 280px;
         overflow: hidden;
@@ -735,6 +877,52 @@
         text-align: left;
       }
       .an-tooltip-discuss:hover { background: #eff6ff; }
+
+      /* ===== Selection Context Menu ===== */
+      .an-selection-menu {
+        position: fixed;
+        top: 0; left: 0;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.12s ease, transform 0.12s ease;
+        transform: translateY(4px);
+        z-index: 10001;
+      }
+      .an-selection-menu.an-visible {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+      }
+      .an-selection-menu-inner {
+        display: flex;
+        gap: 2px;
+        padding: 4px;
+        background: #fff;
+        border-radius: 10px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.2), 0 0 0 1px rgba(0,0,0,0.08);
+      }
+      .an-sel-btn {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 7px 12px;
+        border: none;
+        border-radius: 7px;
+        background: transparent;
+        cursor: pointer;
+        transition: background 0.15s;
+        white-space: nowrap;
+      }
+      .an-sel-btn:hover {
+        background: color-mix(in srgb, var(--btn-color) 12%, transparent);
+      }
+      .an-sel-icon { font-size: 14px; line-height: 1; }
+      .an-sel-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: #374151;
+      }
+      .an-sel-btn:hover .an-sel-label { color: var(--btn-color); }
 
       /* ===== Chat Panel ===== */
       .an-chat-panel {
