@@ -1,5 +1,5 @@
 // ArticleNotes Content Script
-// Inline article annotations with tooltips and chat
+// Inline article annotations with tooltips, chat, and persistence
 
 (function() {
   'use strict';
@@ -14,10 +14,16 @@
     'context':    { icon: '\u{2795}',  label: 'Missing Context',  color: '#8b5cf6' }
   };
 
+  const TRACKING_PARAMS = [
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+    'fbclid', 'gclid', 'ref', 'mc_cid', 'mc_eid'
+  ];
+
   // ============================================================
   // State
   // ============================================================
   let annotations = [];
+  let dismissedIds = new Set();
   let articleContent = null;
   let isAnalyzing = false;
   let highlightElements = [];
@@ -43,11 +49,85 @@
   let isChatProcessing = false;
 
   // ============================================================
+  // Persistence — keyed by normalized URL
+  // ============================================================
+  function normalizeUrl(url) {
+    try {
+      const u = new URL(url);
+      u.hash = '';
+      TRACKING_PARAMS.forEach(p => u.searchParams.delete(p));
+      return u.toString();
+    } catch { return url; }
+  }
+
+  function getStorageKey() {
+    return 'an:' + normalizeUrl(window.location.href);
+  }
+
+  function generateId() {
+    return 'a' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+  }
+
+  async function saveToCache() {
+    const key = getStorageKey();
+    await chrome.storage.local.set({
+      [key]: {
+        url: window.location.href,
+        title: document.title,
+        savedAt: Date.now(),
+        articleMarkdown: articleContent ? articleContent.markdown : '',
+        annotations: annotations,
+        dismissedIds: [...dismissedIds]
+      }
+    });
+  }
+
+  async function loadFromCache() {
+    const key = getStorageKey();
+    const result = await chrome.storage.local.get(key);
+    return result[key] || null;
+  }
+
+  async function clearCache() {
+    const key = getStorageKey();
+    await chrome.storage.local.remove(key);
+  }
+
+  async function restoreFromCache() {
+    try {
+      const cached = await loadFromCache();
+      if (!cached || !cached.annotations || cached.annotations.length === 0) return;
+
+      if (!overlayContainer) createOverlay();
+
+      dismissedIds = new Set(cached.dismissedIds || []);
+      annotations = cached.annotations.filter(a => a && a.id && !dismissedIds.has(a.id));
+
+      if (cached.articleMarkdown) {
+        articleContent = {
+          title: cached.title || document.title,
+          url: window.location.href,
+          markdown: cached.articleMarkdown
+        };
+      }
+
+      if (annotations.length > 0) {
+        highlightAnnotations();
+      }
+    } catch (e) {
+      console.warn('ArticleNotes: failed to restore cache', e);
+    }
+  }
+
+  // ============================================================
   // Message Listener
   // ============================================================
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'analyzeArticle') {
       analyzeArticle();
+      sendResponse({ success: true });
+    } else if (message.action === 'clearAnnotations') {
+      clearAllAnnotations();
       sendResponse({ success: true });
     }
     return true;
@@ -128,7 +208,8 @@
     if (isAnalyzing) return;
     isAnalyzing = true;
 
-    clearAnnotations();
+    clearHighlights();
+    dismissedIds = new Set();
     if (!overlayContainer) createOverlay();
 
     showStatus('Analyzing article\u2026');
@@ -157,12 +238,19 @@
       }
 
       annotations = response.annotations;
+      annotations.forEach(ann => {
+        ann.id = generateId();
+        ann.source = 'auto';
+        ann.chatHistory = ann.chatHistory || [];
+      });
+
       highlightAnnotations();
+      await saveToCache();
 
       const placed = highlightElements.length;
       showStatus(
         placed > 0
-          ? `\u2713 ${placed} annotation${placed !== 1 ? 's' : ''} added`
+          ? '\u2713 ' + placed + ' annotation' + (placed !== 1 ? 's' : '') + ' added'
           : 'Could not place annotations in this page',
         placed === 0,
         3000
@@ -182,25 +270,23 @@
     const container = getArticleContainer();
     if (!container) return;
 
-    // Find positions of all quotes so we can process end-to-start
-    // (avoids earlier highlights invalidating later ones)
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
     let fullText = '';
     while (walker.nextNode()) fullText += walker.currentNode.textContent;
 
-    const positioned = annotations.map((ann, i) => {
+    const positioned = annotations.map(ann => {
       let pos = fullText.indexOf(ann.quote);
       if (pos === -1) pos = fullText.toLowerCase().indexOf(ann.quote.toLowerCase());
-      return { annotation: ann, index: i, position: pos };
+      return { annotation: ann, position: pos };
     }).filter(p => p.position !== -1);
 
     positioned.sort((a, b) => b.position - a.position);
 
-    for (const { annotation, index } of positioned) {
-      const mark = findAndHighlight(container, annotation.quote, index, annotation.type);
+    for (const { annotation } of positioned) {
+      const mark = findAndHighlight(container, annotation.quote, annotation.id, annotation.type);
       if (mark) {
         highlightElements.push(mark);
-        attachHighlightListeners(mark, index);
+        attachHighlightListeners(mark, annotation);
       }
     }
   }
@@ -250,7 +336,7 @@
 
   function wrapRangeWithHighlight(range, id, type) {
     const mark = document.createElement('mark');
-    mark.className = `an-highlight an-type-${type}`;
+    mark.className = 'an-highlight an-type-' + type;
     mark.dataset.annotationId = String(id);
 
     try {
@@ -268,7 +354,7 @@
     }
   }
 
-  function clearAnnotations() {
+  function clearHighlights() {
     for (const mark of highlightElements) {
       const parent = mark.parentNode;
       if (!parent) continue;
@@ -280,9 +366,35 @@
     annotations = [];
   }
 
-  function attachHighlightListeners(mark, annotationId) {
+  async function clearAllAnnotations() {
+    clearHighlights();
+    dismissedIds = new Set();
+    await clearCache();
+    if (overlayContainer) showStatus('Annotations cleared', false, 2000);
+  }
+
+  function dismissAnnotation(annotationId) {
+    dismissedIds.add(annotationId);
+
+    const mark = document.querySelector('mark.an-highlight[data-annotation-id="' + annotationId + '"]');
+    if (mark) {
+      const parent = mark.parentNode;
+      if (parent) {
+        while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+        parent.removeChild(mark);
+        parent.normalize();
+      }
+      highlightElements = highlightElements.filter(m => m !== mark);
+    }
+
+    annotations = annotations.filter(a => a.id !== annotationId);
+    hideTooltip();
+    saveToCache();
+  }
+
+  function attachHighlightListeners(mark, annotation) {
     mark.addEventListener('mouseenter', () => {
-      showTooltip(annotations[annotationId], mark);
+      showTooltip(annotation, mark);
     });
     mark.addEventListener('mouseleave', () => {
       scheduleHideTooltip();
@@ -291,7 +403,7 @@
       e.preventDefault();
       e.stopPropagation();
       hideTooltip();
-      openChat(annotations[annotationId]);
+      openChat(annotation);
     });
   }
 
@@ -365,15 +477,20 @@
   function showTooltip(annotation, highlightEl) {
     clearTimeout(tooltipHideTimer);
     const meta = ANNOTATION_META[annotation.type] || ANNOTATION_META['context'];
+    const hasChat = annotation.chatHistory && annotation.chatHistory.length > 0;
 
     tooltipEl.innerHTML =
       '<div class="an-tooltip-inner" style="--type-color: ' + meta.color + '">' +
         '<div class="an-tooltip-header">' +
           '<span class="an-type-badge">' + meta.icon + ' ' + meta.label + '</span>' +
+          (annotation.source === 'user' ? '<span class="an-source-badge">User</span>' : '') +
         '</div>' +
         '<div class="an-tooltip-title">' + escapeHtml(annotation.title) + '</div>' +
         '<div class="an-tooltip-body">' + escapeHtml(annotation.explanation) + '</div>' +
-        '<button class="an-tooltip-discuss">\u{1F4AC} Discuss this</button>' +
+        '<div class="an-tooltip-actions">' +
+          '<button class="an-tooltip-discuss">\u{1F4AC} ' + (hasChat ? 'Continue chat' : 'Discuss') + '</button>' +
+          '<button class="an-tooltip-dismiss">\u2715 Dismiss</button>' +
+        '</div>' +
       '</div>';
 
     tooltipEl.className = 'an-tooltip an-visible';
@@ -382,7 +499,6 @@
     let top = rect.bottom + 8;
     let left = rect.left;
 
-    // Position after rendering so we can measure
     requestAnimationFrame(() => {
       const tRect = tooltipEl.getBoundingClientRect();
       if (left + tRect.width > window.innerWidth - 16) {
@@ -399,11 +515,18 @@
     tooltipEl.onmouseenter = () => clearTimeout(tooltipHideTimer);
     tooltipEl.onmouseleave = () => hideTooltip();
 
-    const btn = tooltipEl.querySelector('.an-tooltip-discuss');
-    if (btn) {
-      btn.onclick = () => {
+    const discussBtn = tooltipEl.querySelector('.an-tooltip-discuss');
+    if (discussBtn) {
+      discussBtn.onclick = () => {
         hideTooltip();
         openChat(annotation);
+      };
+    }
+
+    const dismissBtn = tooltipEl.querySelector('.an-tooltip-dismiss');
+    if (dismissBtn) {
+      dismissBtn.onclick = () => {
+        dismissAnnotation(annotation.id);
       };
     }
   }
@@ -414,15 +537,15 @@
 
   function hideTooltip() {
     clearTimeout(tooltipHideTimer);
-    tooltipEl.className = 'an-tooltip';
+    if (tooltipEl) tooltipEl.className = 'an-tooltip';
   }
 
   // ============================================================
-  // Chat Panel (slide-in sidebar)
+  // Chat Panel (slide-in sidebar) — with persistent history
   // ============================================================
   function openChat(annotation) {
     currentChatAnnotation = annotation;
-    chatConversationHistory = [];
+    chatConversationHistory = annotation.chatHistory ? [...annotation.chatHistory] : [];
     isChatProcessing = false;
 
     const meta = ANNOTATION_META[annotation.type] || ANNOTATION_META['context'];
@@ -454,6 +577,13 @@
 
     chatPanelEl.className = 'an-chat-panel an-visible';
 
+    // Restore previous chat messages
+    if (chatConversationHistory.length > 0) {
+      for (const msg of chatConversationHistory) {
+        addChatMessage(msg.content, msg.role);
+      }
+    }
+
     const closeBtn = chatPanelEl.querySelector('.an-chat-close');
     const input = chatPanelEl.querySelector('.an-chat-input');
     const sendBtn = chatPanelEl.querySelector('.an-chat-send-btn');
@@ -475,7 +605,7 @@
   }
 
   function closeChat() {
-    chatPanelEl.className = 'an-chat-panel';
+    if (chatPanelEl) chatPanelEl.className = 'an-chat-panel';
     currentChatAnnotation = null;
     chatConversationHistory = [];
     isChatProcessing = false;
@@ -523,6 +653,10 @@
             addChatMessage('No response generated.', 'assistant', true);
           } else {
             chatConversationHistory.push({ role: 'assistant', content: fullResponse });
+            if (currentChatAnnotation) {
+              currentChatAnnotation.chatHistory = [...chatConversationHistory];
+              saveToCache();
+            }
           }
           isChatProcessing = false;
           port.disconnect();
@@ -707,13 +841,16 @@
       }
 
       const annotation = response.annotation;
-      const idx = annotations.length;
+      annotation.id = generateId();
+      annotation.source = 'user';
+      annotation.chatHistory = [];
       annotations.push(annotation);
 
-      const mark = wrapRangeWithHighlight(range, idx, annotation.type);
+      const mark = wrapRangeWithHighlight(range, annotation.id, annotation.type);
       if (mark) {
         highlightElements.push(mark);
-        attachHighlightListeners(mark, idx);
+        attachHighlightListeners(mark, annotation);
+        await saveToCache();
         showStatus('\u2713 Annotation added', false, 2500);
         showTooltip(annotation, mark);
       } else {
@@ -837,7 +974,12 @@
         min-width: 280px;
         overflow: hidden;
       }
-      .an-tooltip-header { padding: 12px 16px 0; }
+      .an-tooltip-header {
+        padding: 12px 16px 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
 
       .an-type-badge {
         display: inline-flex;
@@ -849,6 +991,14 @@
         border-radius: 20px;
         font-size: 12px;
         font-weight: 600;
+      }
+      .an-source-badge {
+        padding: 2px 8px;
+        background: #f3f4f6;
+        color: #6b7280;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 500;
       }
       .an-tooltip-title {
         padding: 8px 16px 4px;
@@ -862,21 +1012,28 @@
         color: #4b5563;
         line-height: 1.6;
       }
-      .an-tooltip-discuss {
-        display: block;
-        width: 100%;
+      .an-tooltip-actions {
+        display: flex;
+        border-top: 1px solid #e5e7eb;
+      }
+      .an-tooltip-discuss, .an-tooltip-dismiss {
+        flex: 1;
         padding: 10px 16px;
         background: #f9fafb;
         border: none;
-        border-top: 1px solid #e5e7eb;
-        color: #2563eb;
         font-size: 13px;
         font-weight: 500;
         cursor: pointer;
         transition: background 0.15s;
-        text-align: left;
+        text-align: center;
       }
+      .an-tooltip-discuss {
+        color: #2563eb;
+        border-right: 1px solid #e5e7eb;
+      }
+      .an-tooltip-dismiss { color: #6b7280; }
       .an-tooltip-discuss:hover { background: #eff6ff; }
+      .an-tooltip-dismiss:hover { background: #fef2f2; color: #dc2626; }
 
       /* ===== Selection Context Menu ===== */
       .an-selection-menu {
@@ -1118,5 +1275,10 @@
       .an-chat-send-btn svg { width: 18px; height: 18px; color: #fff; }
     `;
   }
+
+  // ============================================================
+  // Auto-restore cached annotations on page load
+  // ============================================================
+  restoreFromCache();
 
 })();

@@ -3,6 +3,7 @@ const apiKeyInput = document.getElementById('api-key');
 const toggleVisibilityBtn = document.getElementById('toggle-visibility');
 const saveKeyBtn = document.getElementById('save-key');
 const analyzeBtn = document.getElementById('analyze-btn');
+const clearBtn = document.getElementById('clear-btn');
 const statusEl = document.getElementById('status');
 const iconEye = document.querySelector('.icon-eye');
 const iconEyeOff = document.querySelector('.icon-eye-off');
@@ -77,6 +78,30 @@ analyzeBtn.addEventListener('click', async () => {
     
     // Close the popup
     window.close();
+  } catch (error) {
+    updateStatus('Error: Refresh the page and try again', 'error');
+    console.error('Error:', error);
+  }
+});
+
+// Clear annotations on current page
+clearBtn.addEventListener('click', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    if (!tab) {
+      updateStatus('No active tab found', 'error');
+      return;
+    }
+
+    if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+      updateStatus('Cannot clear on browser pages', 'error');
+      return;
+    }
+
+    await chrome.tabs.sendMessage(tab.id, { action: 'clearAnnotations' });
+    updateStatus('Annotations cleared', 'success');
+    setTimeout(() => window.close(), 800);
   } catch (error) {
     updateStatus('Error: Refresh the page and try again', 'error');
     console.error('Error:', error);

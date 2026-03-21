@@ -156,6 +156,20 @@ body {
   background: #e5e7eb;
 }
 
+.btn-danger {
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+}
+
+.btn-danger:hover {
+  background: #fee2e2;
+}
+
+.btn-danger svg {
+  color: #dc2626;
+}
+
 .divider {
   border: none;
   border-top: 1px solid #e5e7eb;
