@@ -1,60 +1,61 @@
-/* DOMinion — Soft highlight marker styles */
+/* DOMinion — Inline highlight styles */
 
 mark.an-highlight {
   cursor: pointer;
   position: relative;
-  border-radius: 0;
+  border-radius: 3px;
   padding: 1px 3px;
-  background: rgba(249, 229, 71, 0.35);
-  border-bottom: 2px solid rgba(249, 229, 71, 0.8);
+  background: rgba(249, 229, 71, 0.45);
+  border-bottom: 2.5px solid rgba(200, 180, 20, 0.85);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  transition: background-color 0.2s, box-shadow 0.2s;
+  transition: background-color 0.2s, box-shadow 0.2s, transform 0.15s;
 }
 
 mark.an-highlight:hover {
-  background: rgba(249, 229, 71, 0.55);
-  box-shadow: 0 1px 6px rgba(249, 229, 71, 0.3);
+  background: rgba(249, 229, 71, 0.65);
+  box-shadow: 0 2px 8px rgba(249, 229, 71, 0.35);
 }
 
 mark.an-type-fact-check {
-  background: rgba(255, 107, 107, 0.15);
-  border-bottom-color: rgba(255, 107, 107, 0.6);
+  background: rgba(255, 107, 107, 0.22);
+  border-bottom-color: rgba(220, 70, 70, 0.75);
 }
 mark.an-type-fact-check:hover {
-  background: rgba(255, 107, 107, 0.28);
-  box-shadow: 0 1px 6px rgba(255, 107, 107, 0.2);
+  background: rgba(255, 107, 107, 0.38);
+  box-shadow: 0 2px 8px rgba(255, 107, 107, 0.25);
 }
 
 mark.an-type-jargon {
-  background: rgba(196, 181, 253, 0.2);
-  border-bottom-color: rgba(196, 181, 253, 0.7);
+  background: rgba(176, 155, 253, 0.28);
+  border-bottom-color: rgba(140, 115, 240, 0.75);
 }
 mark.an-type-jargon:hover {
-  background: rgba(196, 181, 253, 0.35);
-  box-shadow: 0 1px 6px rgba(196, 181, 253, 0.25);
+  background: rgba(176, 155, 253, 0.44);
+  box-shadow: 0 2px 8px rgba(176, 155, 253, 0.3);
 }
 
 mark.an-type-source {
-  background: rgba(249, 229, 71, 0.25);
-  border-bottom-color: rgba(249, 229, 71, 0.7);
+  background: rgba(249, 229, 71, 0.35);
+  border-bottom-color: rgba(200, 180, 20, 0.8);
 }
 mark.an-type-source:hover {
-  background: rgba(249, 229, 71, 0.45);
+  background: rgba(249, 229, 71, 0.55);
+  box-shadow: 0 2px 8px rgba(249, 229, 71, 0.3);
 }
 
 mark.an-type-context {
-  background: rgba(196, 181, 253, 0.15);
-  border-bottom-color: rgba(196, 181, 253, 0.5);
+  background: rgba(176, 155, 253, 0.22);
+  border-bottom-color: rgba(140, 115, 240, 0.65);
 }
 mark.an-type-context:hover {
-  background: rgba(196, 181, 253, 0.28);
-  box-shadow: 0 1px 6px rgba(196, 181, 253, 0.2);
+  background: rgba(176, 155, 253, 0.38);
+  box-shadow: 0 2px 8px rgba(176, 155, 253, 0.25);
 }
 
 @keyframes an-pulse-ring {
-  0%   { box-shadow: 0 0 0 0 rgba(249, 229, 71, 0.5); }
-  70%  { box-shadow: 0 0 0 8px rgba(249, 229, 71, 0); }
+  0%   { box-shadow: 0 0 0 0 rgba(249, 229, 71, 0.6); }
+  70%  { box-shadow: 0 0 0 10px rgba(249, 229, 71, 0); }
   100% { box-shadow: 0 0 0 0 rgba(249, 229, 71, 0); }
 }
 
