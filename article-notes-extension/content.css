@@ -1,0 +1,15 @@
+/* 
+ * ArticleNotes Content CSS
+ * Minimal styles for the modal container
+ * Most styles are in shadow DOM to prevent conflicts
+ */
+
+#article-notes-modal-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2147483647;
+  pointer-events: auto;
+}
