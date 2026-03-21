@@ -1,30 +1,51 @@
 {
   "manifest_version": 3,
-  "name": "ArticleNotes",
-  "version": "0.1.0",
-  "description": "AI-powered article annotations — fact-checks, context, and explanations inline.",
+  "name": "DOMinion",
+  "version": "1.0.0",
+  "description": "AI-powered inline article annotations with fact-checks, explanations, and context",
   "permissions": [
     "activeTab",
     "storage",
+    "unlimitedStorage",
     "scripting"
   ],
-  "host_permissions": [
-    "https://generativelanguage.googleapis.com/*"
-  ],
   "action": {
-    "default_popup": "popup.html",
+    "default_popup": "extension/popup.html",
     "default_icon": {
-      // "16": "icons/icon16.png",
-      // "48": "icons/icon48.png",
-      // "128": "icons/icon128.png"
+      "16": "extension/icons/icon16.png",
+      "48": "extension/icons/icon48.png",
+      "128": "extension/icons/icon128.png"
     }
+  },
+  "icons": {
+    "16": "extension/icons/icon16.png",
+    "48": "extension/icons/icon48.png",
+    "128": "extension/icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "extension/background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "css": ["content.css"],
-      "js": ["content.js"],
+      "js": [
+        "extension/turndown.js",
+        "extension/turndown-plugin-gfm.js",
+        "extension/content.js"
+      ],
+      "css": ["extension/content.css"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "extension/turndown.js",
+        "extension/turndown-plugin-gfm.js",
+        "assets/dominion_fig_logo.webp"
+      ],
+      "matches": ["<all_urls>"]
     }
   ]
 }
