@@ -73,8 +73,7 @@ analyzeBtn.addEventListener('click', async () => {
       return;
     }
 
-    // Send message to content script to open the modal
-    await chrome.tabs.sendMessage(tab.id, { action: 'openArticleNotes' });
+    await chrome.tabs.sendMessage(tab.id, { action: 'analyzeArticle' });
     
     // Close the popup
     window.close();

@@ -1,15 +1,18 @@
-/* 
- * ArticleNotes Content CSS
- * Minimal styles for the modal container
- * Most styles are in shadow DOM to prevent conflicts
- */
+/* ArticleNotes — Inline highlight styles (injected into page DOM) */
 
-#article-notes-modal-container {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 2147483647;
-  pointer-events: auto;
+mark.an-highlight {
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  border-radius: 2px;
+  transition: background-color 0.2s ease;
+  padding: 1px 0;
 }
+mark.an-highlight:hover {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+mark.an-type-fact-check { border-bottom: 2px solid #f59e0b; }
+mark.an-type-jargon     { border-bottom: 2px solid #3b82f6; }
+mark.an-type-source      { border-bottom: 2px solid #10b981; }
+mark.an-type-context     { border-bottom: 2px solid #8b5cf6; }

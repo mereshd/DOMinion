@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ArticleNotes",
   "version": "1.0.0",
-  "description": "AI-powered article analysis and note-taking assistant",
+  "description": "AI-powered inline article annotations with fact-checks, explanations, and context",
   "permissions": [
     "activeTab",
     "storage",

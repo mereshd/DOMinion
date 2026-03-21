@@ -1,64 +1,75 @@
 // ArticleNotes Content Script
-// Handles content extraction and modal chat UI
+// Inline article annotations with tooltips and chat
 
 (function() {
   'use strict';
 
-  // State
-  let modal = null;
-  let shadowRoot = null;
-  let articleContent = null;
-  let conversationHistory = [];
-  let isProcessing = false;
+  // ============================================================
+  // Constants
+  // ============================================================
+  const ANNOTATION_META = {
+    'fact-check': { icon: '\u{1F50D}', label: 'Fact-check',      color: '#f59e0b' },
+    'jargon':     { icon: '\u{1F4D6}', label: 'Explanation',     color: '#3b82f6' },
+    'source':     { icon: '\u{1F517}', label: 'Source Analysis',  color: '#10b981' },
+    'context':    { icon: '\u{2795}',  label: 'Missing Context',  color: '#8b5cf6' }
+  };
 
-  // Listen for messages from popup or background
+  // ============================================================
+  // State
+  // ============================================================
+  let annotations = [];
+  let articleContent = null;
+  let isAnalyzing = false;
+  let highlightElements = [];
+
+  // Overlay UI (shadow DOM)
+  let overlayContainer = null;
+  let overlayShadow = null;
+  let tooltipEl = null;
+  let chatPanelEl = null;
+  let statusBannerEl = null;
+
+  // Tooltip
+  let tooltipHideTimer = null;
+
+  // Chat
+  let currentChatAnnotation = null;
+  let chatConversationHistory = [];
+  let isChatProcessing = false;
+
+  // ============================================================
+  // Message Listener
+  // ============================================================
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'openArticleNotes') {
-      openModal();
+    if (message.action === 'analyzeArticle') {
+      analyzeArticle();
       sendResponse({ success: true });
     }
     return true;
   });
 
-  // Extract article content using Turndown
-  function extractArticleContent() {
-    // Priority selectors for article content
+  // ============================================================
+  // Article Extraction (HTML → Markdown via Turndown)
+  // ============================================================
+  function getArticleContainer() {
     const selectors = [
-      'article',
-      '[role="article"]',
-      'main article',
-      'main',
-      '[role="main"]',
-      '.post-content',
-      '.article-content',
-      '.entry-content',
-      '.content',
-      '#content',
-      '.post',
-      '.article'
+      'article', '[role="article"]', 'main article', 'main',
+      '[role="main"]', '.post-content', '.article-content',
+      '.entry-content', '.content', '#content', '.post', '.article'
     ];
-
-    let contentElement = null;
-    
-    for (const selector of selectors) {
-      const el = document.querySelector(selector);
-      if (el && el.textContent.trim().length > 500) {
-        contentElement = el;
-        break;
-      }
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent.trim().length > 500) return el;
     }
+    return document.body;
+  }
 
-    // Fallback to body
-    if (!contentElement) {
-      contentElement = document.body;
-    }
-
-    // Clone the element to avoid modifying the original
+  function extractArticleContent() {
+    const contentElement = getArticleContainer();
     const clone = contentElement.cloneNode(true);
 
-    // Remove unwanted elements
     const removeSelectors = [
-      'nav', 'header', 'footer', 'aside', 
+      'nav', 'header', 'footer', 'aside',
       '.sidebar', '.navigation', '.menu', '.ads', '.advertisement',
       '.comments', '.comment', '.social-share', '.related-posts',
       'script', 'style', 'noscript', 'iframe', 'svg',
@@ -66,34 +77,28 @@
       '.cookie-banner', '.newsletter-signup', '.popup'
     ];
 
-    removeSelectors.forEach(selector => {
-      clone.querySelectorAll(selector).forEach(el => el.remove());
+    removeSelectors.forEach(sel => {
+      clone.querySelectorAll(sel).forEach(el => el.remove());
     });
 
-    // Configure Turndown
     const turndownService = new TurndownService({
       headingStyle: 'atx',
       codeBlockStyle: 'fenced',
       emDelimiter: '*'
     });
 
-    // Use GFM plugin if available
     if (typeof turndownPluginGfm !== 'undefined') {
       turndownService.use(turndownPluginGfm.gfm);
     }
 
-    // Custom rules
     turndownService.addRule('removeHiddenElements', {
       filter: function(node) {
         const style = window.getComputedStyle(node);
         return style.display === 'none' || style.visibility === 'hidden';
       },
-      replacement: function() {
-        return '';
-      }
+      replacement: () => ''
     });
 
-    // Handle images
     turndownService.addRule('images', {
       filter: 'img',
       replacement: function(content, node) {
@@ -104,167 +109,383 @@
       }
     });
 
-    // Convert to Markdown
-    const markdown = turndownService.turndown(clone);
-    
     return {
       title: document.title,
       url: window.location.href,
-      markdown: markdown.trim()
+      markdown: turndownService.turndown(clone).trim()
     };
   }
 
-  // Create and open the modal
-  function openModal() {
-    if (modal) {
-      modal.style.display = 'flex';
-      return;
+  // ============================================================
+  // Analysis Flow
+  // ============================================================
+  async function analyzeArticle() {
+    if (isAnalyzing) return;
+    isAnalyzing = true;
+
+    clearAnnotations();
+    if (!overlayContainer) createOverlay();
+
+    showStatus('Analyzing article\u2026');
+
+    try {
+      articleContent = extractArticleContent();
+
+      const result = await chrome.storage.sync.get(['geminiApiKey']);
+      if (!result.geminiApiKey) {
+        showStatus('Please set your API key in the extension popup.', true);
+        isAnalyzing = false;
+        return;
+      }
+
+      const response = await chrome.runtime.sendMessage({
+        action: 'analyze',
+        apiKey: result.geminiApiKey,
+        articleContent: articleContent.markdown,
+        articleTitle: articleContent.title
+      });
+
+      if (response.error) {
+        showStatus('Error: ' + response.error, true);
+        isAnalyzing = false;
+        return;
+      }
+
+      annotations = response.annotations;
+      highlightAnnotations();
+
+      const placed = highlightElements.length;
+      showStatus(
+        placed > 0
+          ? `\u2713 ${placed} annotation${placed !== 1 ? 's' : ''} added`
+          : 'Could not place annotations in this page',
+        placed === 0,
+        3000
+      );
+
+    } catch (error) {
+      showStatus('Error: ' + error.message, true);
     }
 
-    // Extract content on first open
-    articleContent = extractArticleContent();
-    conversationHistory = [];
-
-    // Create modal container
-    modal = document.createElement('div');
-    modal.id = 'article-notes-modal-container';
-    
-    // Create shadow DOM for style isolation
-    shadowRoot = modal.attachShadow({ mode: 'open' });
-    
-    // Inject styles
-    const styles = document.createElement('style');
-    styles.textContent = getModalStyles();
-    shadowRoot.appendChild(styles);
-
-    // Create modal structure
-    const modalContent = document.createElement('div');
-    modalContent.className = 'an-modal-backdrop';
-    modalContent.innerHTML = `
-      <div class="an-modal">
-        <div class="an-modal-header">
-          <h2>ArticleNotes</h2>
-          <button class="an-close-btn" aria-label="Close">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div class="an-modal-body">
-          <div class="an-chat-messages" id="an-messages">
-            <div class="an-message an-assistant">
-              <div class="an-message-content">
-                <p>I've analyzed the article: <strong>${escapeHtml(articleContent.title)}</strong></p>
-                <p>Ask me anything about it - I can summarize key points, explain concepts, or answer specific questions.</p>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="an-modal-footer">
-          <div class="an-input-container">
-            <textarea 
-              id="an-input" 
-              placeholder="Ask about this article..." 
-              rows="1"
-            ></textarea>
-            <button id="an-send-btn" class="an-send-btn" aria-label="Send">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="22" y1="2" x2="11" y2="13"/>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-
-    shadowRoot.appendChild(modalContent);
-    document.body.appendChild(modal);
-
-    // Set up event listeners
-    setupEventListeners();
-
-    // Focus input
-    setTimeout(() => {
-      shadowRoot.getElementById('an-input').focus();
-    }, 100);
+    isAnalyzing = false;
   }
 
-  // Set up modal event listeners
-  function setupEventListeners() {
-    const backdrop = shadowRoot.querySelector('.an-modal-backdrop');
-    const closeBtn = shadowRoot.querySelector('.an-close-btn');
-    const input = shadowRoot.getElementById('an-input');
-    const sendBtn = shadowRoot.getElementById('an-send-btn');
+  // ============================================================
+  // DOM Highlighting
+  // ============================================================
+  function highlightAnnotations() {
+    const container = getArticleContainer();
+    if (!container) return;
 
-    // Close on backdrop click
-    backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop) {
-        closeModal();
+    // Find positions of all quotes so we can process end-to-start
+    // (avoids earlier highlights invalidating later ones)
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let fullText = '';
+    while (walker.nextNode()) fullText += walker.currentNode.textContent;
+
+    const positioned = annotations.map((ann, i) => {
+      let pos = fullText.indexOf(ann.quote);
+      if (pos === -1) pos = fullText.toLowerCase().indexOf(ann.quote.toLowerCase());
+      return { annotation: ann, index: i, position: pos };
+    }).filter(p => p.position !== -1);
+
+    positioned.sort((a, b) => b.position - a.position);
+
+    for (const { annotation, index } of positioned) {
+      const mark = findAndHighlight(container, annotation.quote, index, annotation.type);
+      if (mark) {
+        highlightElements.push(mark);
+        attachHighlightListeners(mark, index);
       }
+    }
+  }
+
+  function findAndHighlight(root, quote, id, type) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+    let fullText = '';
+    const nodeMap = textNodes.map(node => {
+      const start = fullText.length;
+      fullText += node.textContent;
+      return { node, start };
     });
 
-    // Close button
-    closeBtn.addEventListener('click', closeModal);
+    let matchIndex = fullText.indexOf(quote);
+    if (matchIndex === -1) {
+      matchIndex = fullText.toLowerCase().indexOf(quote.toLowerCase());
+    }
+    if (matchIndex === -1) return null;
 
-    // Send message
-    sendBtn.addEventListener('click', sendMessage);
+    const matchEnd = matchIndex + quote.length;
+    let startNode = null, startOffset = 0, endNode = null, endOffset = 0;
 
-    // Enter to send (Shift+Enter for new line)
+    for (const { node, start } of nodeMap) {
+      const nodeEnd = start + node.textContent.length;
+      if (startNode === null && matchIndex >= start && matchIndex < nodeEnd) {
+        startNode = node;
+        startOffset = matchIndex - start;
+      }
+      if (matchEnd > start && matchEnd <= nodeEnd) {
+        endNode = node;
+        endOffset = matchEnd - start;
+        break;
+      }
+    }
+
+    if (!startNode || !endNode) return null;
+
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+
+    return wrapRangeWithHighlight(range, id, type);
+  }
+
+  function wrapRangeWithHighlight(range, id, type) {
+    const mark = document.createElement('mark');
+    mark.className = `an-highlight an-type-${type}`;
+    mark.dataset.annotationId = String(id);
+
+    try {
+      range.surroundContents(mark);
+      return mark;
+    } catch (e) {
+      try {
+        const contents = range.extractContents();
+        mark.appendChild(contents);
+        range.insertNode(mark);
+        return mark;
+      } catch (e2) {
+        return null;
+      }
+    }
+  }
+
+  function clearAnnotations() {
+    for (const mark of highlightElements) {
+      const parent = mark.parentNode;
+      if (!parent) continue;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+      parent.normalize();
+    }
+    highlightElements = [];
+    annotations = [];
+  }
+
+  function attachHighlightListeners(mark, annotationId) {
+    mark.addEventListener('mouseenter', () => {
+      showTooltip(annotations[annotationId], mark);
+    });
+    mark.addEventListener('mouseleave', () => {
+      scheduleHideTooltip();
+    });
+    mark.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      hideTooltip();
+      openChat(annotations[annotationId]);
+    });
+  }
+
+  // ============================================================
+  // Overlay Container (Shadow DOM for all overlay UI)
+  // ============================================================
+  function createOverlay() {
+    overlayContainer = document.createElement('div');
+    overlayContainer.id = 'article-notes-overlay';
+    overlayShadow = overlayContainer.attachShadow({ mode: 'open' });
+
+    const style = document.createElement('style');
+    style.textContent = getOverlayStyles();
+    overlayShadow.appendChild(style);
+
+    tooltipEl = document.createElement('div');
+    tooltipEl.className = 'an-tooltip';
+    overlayShadow.appendChild(tooltipEl);
+
+    statusBannerEl = document.createElement('div');
+    statusBannerEl.className = 'an-status-banner';
+    overlayShadow.appendChild(statusBannerEl);
+
+    chatPanelEl = document.createElement('div');
+    chatPanelEl.className = 'an-chat-panel';
+    overlayShadow.appendChild(chatPanelEl);
+
+    document.body.appendChild(overlayContainer);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeChat();
+    });
+  }
+
+  // ============================================================
+  // Status Banner
+  // ============================================================
+  function showStatus(text, isError = false, autoHideMs = 0) {
+    if (!statusBannerEl) return;
+    const showSpinner = !isError && autoHideMs === 0;
+    statusBannerEl.className = 'an-status-banner' + (isError ? ' an-error' : '') + ' an-visible';
+    statusBannerEl.innerHTML =
+      '<div class="an-status-content">' +
+        (showSpinner ? '<div class="an-spinner"></div>' : '') +
+        '<span>' + escapeHtml(text) + '</span>' +
+      '</div>';
+    if (autoHideMs > 0) setTimeout(hideStatus, autoHideMs);
+    if (isError) setTimeout(hideStatus, 6000);
+  }
+
+  function hideStatus() {
+    if (statusBannerEl) statusBannerEl.className = 'an-status-banner';
+  }
+
+  // ============================================================
+  // Tooltip
+  // ============================================================
+  function showTooltip(annotation, highlightEl) {
+    clearTimeout(tooltipHideTimer);
+    const meta = ANNOTATION_META[annotation.type] || ANNOTATION_META['context'];
+
+    tooltipEl.innerHTML =
+      '<div class="an-tooltip-inner" style="--type-color: ' + meta.color + '">' +
+        '<div class="an-tooltip-header">' +
+          '<span class="an-type-badge">' + meta.icon + ' ' + meta.label + '</span>' +
+        '</div>' +
+        '<div class="an-tooltip-title">' + escapeHtml(annotation.title) + '</div>' +
+        '<div class="an-tooltip-body">' + escapeHtml(annotation.explanation) + '</div>' +
+        '<button class="an-tooltip-discuss">\u{1F4AC} Discuss this</button>' +
+      '</div>';
+
+    tooltipEl.className = 'an-tooltip an-visible';
+
+    const rect = highlightEl.getBoundingClientRect();
+    let top = rect.bottom + 8;
+    let left = rect.left;
+
+    // Position after rendering so we can measure
+    requestAnimationFrame(() => {
+      const tRect = tooltipEl.getBoundingClientRect();
+      if (left + tRect.width > window.innerWidth - 16) {
+        left = window.innerWidth - tRect.width - 16;
+      }
+      if (left < 16) left = 16;
+      if (top + tRect.height > window.innerHeight - 16) {
+        top = rect.top - tRect.height - 8;
+      }
+      tooltipEl.style.left = left + 'px';
+      tooltipEl.style.top = top + 'px';
+    });
+
+    tooltipEl.onmouseenter = () => clearTimeout(tooltipHideTimer);
+    tooltipEl.onmouseleave = () => hideTooltip();
+
+    const btn = tooltipEl.querySelector('.an-tooltip-discuss');
+    if (btn) {
+      btn.onclick = () => {
+        hideTooltip();
+        openChat(annotation);
+      };
+    }
+  }
+
+  function scheduleHideTooltip() {
+    tooltipHideTimer = setTimeout(hideTooltip, 300);
+  }
+
+  function hideTooltip() {
+    clearTimeout(tooltipHideTimer);
+    tooltipEl.className = 'an-tooltip';
+  }
+
+  // ============================================================
+  // Chat Panel (slide-in sidebar)
+  // ============================================================
+  function openChat(annotation) {
+    currentChatAnnotation = annotation;
+    chatConversationHistory = [];
+    isChatProcessing = false;
+
+    const meta = ANNOTATION_META[annotation.type] || ANNOTATION_META['context'];
+
+    chatPanelEl.innerHTML =
+      '<div class="an-chat-inner">' +
+        '<div class="an-chat-header">' +
+          '<div class="an-chat-header-info">' +
+            '<span class="an-type-badge" style="--type-color: ' + meta.color + '">' + meta.icon + ' ' + meta.label + '</span>' +
+            '<h3>' + escapeHtml(annotation.title) + '</h3>' +
+          '</div>' +
+          '<button class="an-chat-close" aria-label="Close">\u2715</button>' +
+        '</div>' +
+        '<div class="an-chat-context">' +
+          '<blockquote>\u201C' + escapeHtml(annotation.quote) + '\u201D</blockquote>' +
+          '<p>' + escapeHtml(annotation.explanation) + '</p>' +
+        '</div>' +
+        '<div class="an-chat-messages"></div>' +
+        '<div class="an-chat-input-area">' +
+          '<textarea class="an-chat-input" placeholder="Ask about this section\u2026" rows="1"></textarea>' +
+          '<button class="an-chat-send-btn" aria-label="Send">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+              '<line x1="22" y1="2" x2="11" y2="13"/>' +
+              '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
+            '</svg>' +
+          '</button>' +
+        '</div>' +
+      '</div>';
+
+    chatPanelEl.className = 'an-chat-panel an-visible';
+
+    const closeBtn = chatPanelEl.querySelector('.an-chat-close');
+    const input = chatPanelEl.querySelector('.an-chat-input');
+    const sendBtn = chatPanelEl.querySelector('.an-chat-send-btn');
+
+    closeBtn.addEventListener('click', closeChat);
+    sendBtn.addEventListener('click', sendChatMessage);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        sendMessage();
+        sendChatMessage();
       }
     });
-
-    // Auto-resize textarea
     input.addEventListener('input', () => {
       input.style.height = 'auto';
       input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
 
-    // Escape to close
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && modal && modal.style.display !== 'none') {
-        closeModal();
-      }
-    });
+    setTimeout(() => input.focus(), 150);
   }
 
-  // Close modal
-  function closeModal() {
-    if (modal) {
-      modal.style.display = 'none';
-    }
+  function closeChat() {
+    chatPanelEl.className = 'an-chat-panel';
+    currentChatAnnotation = null;
+    chatConversationHistory = [];
+    isChatProcessing = false;
   }
 
-  // Send message to AI (streaming via port)
-  async function sendMessage() {
-    const input = shadowRoot.getElementById('an-input');
+  async function sendChatMessage() {
+    const input = chatPanelEl.querySelector('.an-chat-input');
+    if (!input) return;
     const userMessage = input.value.trim();
-    
-    if (!userMessage || isProcessing) return;
+    if (!userMessage || isChatProcessing) return;
 
-    isProcessing = true;
+    isChatProcessing = true;
     input.value = '';
     input.style.height = 'auto';
 
-    addMessage(userMessage, 'user');
-
-    const loadingId = addLoadingMessage();
+    addChatMessage(userMessage, 'user');
+    const loadingEl = addChatLoading();
 
     try {
       const result = await chrome.storage.sync.get(['geminiApiKey']);
       if (!result.geminiApiKey) {
-        removeLoadingMessage(loadingId);
-        addMessage('Please set your Gemini API key in the extension popup.', 'assistant', true);
-        isProcessing = false;
+        if (loadingEl) loadingEl.remove();
+        addChatMessage('Please set your API key in the extension popup.', 'assistant', true);
+        isChatProcessing = false;
         return;
       }
 
-      conversationHistory.push({ role: 'user', content: userMessage });
+      chatConversationHistory.push({ role: 'user', content: userMessage });
 
       const port = chrome.runtime.connect({ name: 'article-notes-chat' });
       let fullResponse = '';
@@ -273,36 +494,34 @@
       port.onMessage.addListener((msg) => {
         if (msg.type === 'chunk') {
           if (!streamingEl) {
-            removeLoadingMessage(loadingId);
-            streamingEl = addStreamingMessage();
+            if (loadingEl) loadingEl.remove();
+            streamingEl = addChatStreamingMessage();
           }
           fullResponse += msg.text;
-          updateStreamingMessage(streamingEl, fullResponse);
+          updateChatStreamingMessage(streamingEl, fullResponse);
         } else if (msg.type === 'done') {
           if (!streamingEl) {
-            removeLoadingMessage(loadingId);
-            addMessage('No response generated. Please try again.', 'assistant', true);
+            if (loadingEl) loadingEl.remove();
+            addChatMessage('No response generated.', 'assistant', true);
           } else {
-            conversationHistory.push({ role: 'assistant', content: fullResponse });
+            chatConversationHistory.push({ role: 'assistant', content: fullResponse });
           }
-          isProcessing = false;
+          isChatProcessing = false;
           port.disconnect();
         } else if (msg.type === 'error') {
-          removeLoadingMessage(loadingId);
+          if (loadingEl) loadingEl.remove();
           if (streamingEl) streamingEl.remove();
-          addMessage(`Error: ${msg.error}`, 'assistant', true);
-          isProcessing = false;
+          addChatMessage('Error: ' + msg.error, 'assistant', true);
+          isChatProcessing = false;
           port.disconnect();
         }
       });
 
       port.onDisconnect.addListener(() => {
-        if (isProcessing) {
-          removeLoadingMessage(loadingId);
-          if (!streamingEl) {
-            addMessage('Connection lost. Please try again.', 'assistant', true);
-          }
-          isProcessing = false;
+        if (isChatProcessing) {
+          if (loadingEl) loadingEl.remove();
+          if (!streamingEl) addChatMessage('Connection lost.', 'assistant', true);
+          isChatProcessing = false;
         }
       });
 
@@ -311,398 +530,404 @@
         apiKey: result.geminiApiKey,
         articleContent: articleContent.markdown,
         articleTitle: articleContent.title,
-        conversationHistory: conversationHistory
+        annotation: currentChatAnnotation,
+        conversationHistory: chatConversationHistory
       });
 
     } catch (error) {
-      removeLoadingMessage(loadingId);
-      addMessage(`Error: ${error.message}`, 'assistant', true);
-      isProcessing = false;
+      if (loadingEl) loadingEl.remove();
+      addChatMessage('Error: ' + error.message, 'assistant', true);
+      isChatProcessing = false;
     }
   }
 
-  // Add message to chat
-  function addMessage(content, role, isError = false) {
-    const messagesContainer = shadowRoot.getElementById('an-messages');
-    const messageEl = document.createElement('div');
-    messageEl.className = `an-message an-${role}${isError ? ' an-error' : ''}`;
-    
-    // Parse markdown for assistant messages
-    const formattedContent = role === 'assistant' ? parseMarkdown(content) : escapeHtml(content);
-    
-    messageEl.innerHTML = `
-      <div class="an-message-content">
-        ${formattedContent}
-      </div>
-    `;
-    
-    messagesContainer.appendChild(messageEl);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  // Chat message helpers
+  function getChatMessagesContainer() {
+    return chatPanelEl.querySelector('.an-chat-messages');
   }
 
-  // Add loading indicator
-  function addLoadingMessage() {
-    const messagesContainer = shadowRoot.getElementById('an-messages');
-    const loadingEl = document.createElement('div');
-    const loadingId = 'loading-' + Date.now();
-    loadingEl.id = loadingId;
-    loadingEl.className = 'an-message an-assistant an-loading';
-    loadingEl.innerHTML = `
-      <div class="an-message-content">
-        <div class="an-typing-indicator">
-          <span></span><span></span><span></span>
-        </div>
-      </div>
-    `;
-    messagesContainer.appendChild(loadingEl);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    return loadingId;
+  function addChatMessage(content, role, isError = false) {
+    const container = getChatMessagesContainer();
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = 'an-chat-msg an-' + role + (isError ? ' an-error' : '');
+    const formatted = role === 'assistant' ? parseMarkdown(content) : escapeHtml(content);
+    el.innerHTML = '<div class="an-chat-msg-content">' + formatted + '</div>';
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
   }
 
-  // Remove loading indicator
-  function removeLoadingMessage(loadingId) {
-    const loadingEl = shadowRoot.getElementById(loadingId);
-    if (loadingEl) {
-      loadingEl.remove();
-    }
+  function addChatLoading() {
+    const container = getChatMessagesContainer();
+    if (!container) return null;
+    const el = document.createElement('div');
+    el.className = 'an-chat-msg an-assistant an-loading';
+    el.innerHTML = '<div class="an-chat-msg-content"><div class="an-typing"><span></span><span></span><span></span></div></div>';
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
+    return el;
   }
 
-  // Create a message element for streaming content into
-  function addStreamingMessage() {
-    const messagesContainer = shadowRoot.getElementById('an-messages');
-    const messageEl = document.createElement('div');
-    messageEl.className = 'an-message an-assistant';
-    messageEl.innerHTML = `<div class="an-message-content"></div>`;
-    messagesContainer.appendChild(messageEl);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    return messageEl;
+  function addChatStreamingMessage() {
+    const container = getChatMessagesContainer();
+    if (!container) return null;
+    const el = document.createElement('div');
+    el.className = 'an-chat-msg an-assistant';
+    el.innerHTML = '<div class="an-chat-msg-content"></div>';
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
+    return el;
   }
 
-  // Update a streaming message with new content
-  function updateStreamingMessage(messageEl, content) {
-    const contentEl = messageEl.querySelector('.an-message-content');
-    contentEl.innerHTML = parseMarkdown(content);
-    const messagesContainer = shadowRoot.getElementById('an-messages');
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  function updateChatStreamingMessage(el, content) {
+    const c = el.querySelector('.an-chat-msg-content');
+    if (c) c.innerHTML = parseMarkdown(content);
+    const container = getChatMessagesContainer();
+    if (container) container.scrollTop = container.scrollHeight;
   }
 
-  // Simple markdown parser
-  function parseMarkdown(text) {
-    let html = escapeHtml(text);
-    
-    // Code blocks
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
-    
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    
-    // Bold
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    
-    // Italic
-    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    
-    // Headers
-    html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
-    html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
-    html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
-    
-    // Lists
-    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
-    
-    // Numbered lists
-    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-    
-    // Line breaks
-    html = html.replace(/\n\n/g, '</p><p>');
-    html = html.replace(/\n/g, '<br>');
-    
-    // Wrap in paragraph if not already wrapped
-    if (!html.startsWith('<')) {
-      html = '<p>' + html + '</p>';
-    }
-    
-    return html;
-  }
-
-  // Escape HTML
+  // ============================================================
+  // Utilities
+  // ============================================================
   function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
   }
 
-  // Modal styles
-  function getModalStyles() {
+  function parseMarkdown(text) {
+    let html = escapeHtml(text);
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/\n\n/g, '</p><p>');
+    html = html.replace(/\n/g, '<br>');
+    if (!html.startsWith('<')) html = '<p>' + html + '</p>';
+    return html;
+  }
+
+  // ============================================================
+  // Overlay Styles (isolated inside shadow DOM)
+  // ============================================================
+  function getOverlayStyles() {
     return `
+      :host {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 0 !important;
+        height: 0 !important;
+        overflow: visible !important;
+        z-index: 2147483647 !important;
+        pointer-events: none !important;
+      }
+
       * {
         margin: 0;
         padding: 0;
         box-sizing: border-box;
-      }
-
-      .an-modal-backdrop {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.5);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 2147483647;
-        animation: an-fadeIn 0.2s ease;
-      }
-
-      @keyframes an-fadeIn {
-        from { opacity: 0; }
-        to { opacity: 1; }
-      }
-
-      @keyframes an-slideUp {
-        from { 
-          opacity: 0;
-          transform: translateY(20px) scale(0.95);
-        }
-        to { 
-          opacity: 1;
-          transform: translateY(0) scale(1);
-        }
-      }
-
-      .an-modal {
-        background: #ffffff;
-        border-radius: 16px;
-        width: 90%;
-        max-width: 600px;
-        max-height: 80vh;
-        display: flex;
-        flex-direction: column;
-        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-        animation: an-slideUp 0.3s ease;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         font-size: 14px;
         line-height: 1.5;
         color: #1a1a2e;
       }
 
-      .an-modal-header {
+      /* ===== Status Banner ===== */
+      .an-status-banner {
+        position: fixed;
+        top: -60px;
+        left: 50%;
+        transform: translateX(-50%);
+        transition: top 0.3s ease;
+        pointer-events: auto;
+        z-index: 10000;
+      }
+      .an-status-banner.an-visible { top: 16px; }
+
+      .an-status-content {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        padding: 16px 20px;
-        border-bottom: 1px solid #e5e7eb;
+        gap: 10px;
+        padding: 12px 24px;
+        background: #1a1a2e;
+        color: #fff;
+        border-radius: 12px;
+        box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+        font-size: 14px;
+        font-weight: 500;
+        white-space: nowrap;
       }
+      .an-status-content span { color: #fff; }
+      .an-status-banner.an-error .an-status-content { background: #dc2626; }
 
-      .an-modal-header h2 {
-        font-size: 18px;
+      .an-spinner {
+        width: 18px; height: 18px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: an-spin 0.8s linear infinite;
+      }
+      @keyframes an-spin { to { transform: rotate(360deg); } }
+
+      /* ===== Tooltip ===== */
+      .an-tooltip {
+        position: fixed;
+        top: 0; left: 0;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease;
+        z-index: 10000;
+      }
+      .an-tooltip.an-visible { opacity: 1; pointer-events: auto; }
+
+      .an-tooltip-inner {
+        background: #fff;
+        border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+        max-width: 380px;
+        min-width: 280px;
+        overflow: hidden;
+      }
+      .an-tooltip-header { padding: 12px 16px 0; }
+
+      .an-type-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 10px;
+        background: color-mix(in srgb, var(--type-color) 15%, transparent);
+        color: var(--type-color);
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .an-tooltip-title {
+        padding: 8px 16px 4px;
+        font-size: 15px;
         font-weight: 600;
         color: #1a1a2e;
       }
-
-      .an-close-btn {
-        background: none;
+      .an-tooltip-body {
+        padding: 0 16px 12px;
+        font-size: 13px;
+        color: #4b5563;
+        line-height: 1.6;
+      }
+      .an-tooltip-discuss {
+        display: block;
+        width: 100%;
+        padding: 10px 16px;
+        background: #f9fafb;
         border: none;
-        padding: 8px;
+        border-top: 1px solid #e5e7eb;
+        color: #2563eb;
+        font-size: 13px;
+        font-weight: 500;
         cursor: pointer;
-        border-radius: 8px;
         transition: background 0.15s;
+        text-align: left;
       }
+      .an-tooltip-discuss:hover { background: #eff6ff; }
 
-      .an-close-btn:hover {
-        background: #f3f4f6;
+      /* ===== Chat Panel ===== */
+      .an-chat-panel {
+        position: fixed;
+        top: 0;
+        right: -420px;
+        width: 400px;
+        height: 100vh;
+        background: #fff;
+        box-shadow: -4px 0 30px rgba(0,0,0,0.12);
+        transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        pointer-events: auto;
+        z-index: 9999;
       }
+      .an-chat-panel.an-visible { right: 0; }
 
-      .an-close-btn svg {
-        width: 20px;
-        height: 20px;
-        color: #6b7280;
-      }
-
-      .an-modal-body {
-        flex: 1;
-        overflow: hidden;
+      .an-chat-inner {
         display: flex;
         flex-direction: column;
+        height: 100%;
+      }
+      .an-chat-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        padding: 16px 20px;
+        border-bottom: 1px solid #e5e7eb;
+        gap: 12px;
+      }
+      .an-chat-header-info { flex: 1; }
+      .an-chat-header-info h3 {
+        margin-top: 8px;
+        font-size: 16px;
+        font-weight: 600;
+        color: #1a1a2e;
+      }
+      .an-chat-close {
+        background: none;
+        border: none;
+        width: 32px; height: 32px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 18px;
+        color: #6b7280;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s;
+        flex-shrink: 0;
+      }
+      .an-chat-close:hover { background: #f3f4f6; }
+
+      .an-chat-context {
+        padding: 16px 20px;
+        background: #f9fafb;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .an-chat-context blockquote {
+        font-style: italic;
+        color: #6b7280;
+        border-left: 3px solid #d1d5db;
+        padding-left: 12px;
+        margin-bottom: 8px;
+        font-size: 13px;
+      }
+      .an-chat-context p {
+        font-size: 13px;
+        color: #374151;
+        line-height: 1.6;
       }
 
       .an-chat-messages {
         flex: 1;
         overflow-y: auto;
-        padding: 20px;
+        padding: 16px 20px;
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: 12px;
       }
+      .an-chat-msg { max-width: 90%; }
+      .an-chat-msg.an-user { align-self: flex-end; }
+      .an-chat-msg.an-assistant { align-self: flex-start; }
 
-      .an-message {
-        display: flex;
-        max-width: 85%;
-      }
-
-      .an-message.an-user {
-        align-self: flex-end;
-      }
-
-      .an-message.an-assistant {
-        align-self: flex-start;
-      }
-
-      .an-message-content {
-        padding: 12px 16px;
+      .an-chat-msg-content {
+        padding: 10px 14px;
         border-radius: 12px;
         word-break: break-word;
+        font-size: 13px;
+        line-height: 1.6;
       }
-
-      .an-user .an-message-content {
+      .an-user .an-chat-msg-content {
         background: #2563eb;
-        color: #ffffff;
+        color: #fff;
         border-bottom-right-radius: 4px;
       }
-
-      .an-assistant .an-message-content {
+      .an-user .an-chat-msg-content * { color: #fff; }
+      .an-assistant .an-chat-msg-content {
         background: #f3f4f6;
         color: #1a1a2e;
         border-bottom-left-radius: 4px;
       }
-
-      .an-error .an-message-content {
+      .an-error .an-chat-msg-content {
         background: #fef2f2;
         color: #dc2626;
       }
+      .an-error .an-chat-msg-content * { color: #dc2626; }
 
-      .an-message-content p {
-        margin-bottom: 8px;
-      }
-
-      .an-message-content p:last-child {
-        margin-bottom: 0;
-      }
-
-      .an-message-content strong {
-        font-weight: 600;
-      }
-
-      .an-message-content code {
-        background: rgba(0, 0, 0, 0.1);
-        padding: 2px 6px;
+      .an-chat-msg-content p { margin-bottom: 6px; }
+      .an-chat-msg-content p:last-child { margin-bottom: 0; }
+      .an-chat-msg-content strong { font-weight: 600; }
+      .an-chat-msg-content code {
+        background: rgba(0,0,0,0.08);
+        padding: 1px 5px;
         border-radius: 4px;
         font-family: 'SF Mono', Monaco, 'Courier New', monospace;
-        font-size: 13px;
+        font-size: 12px;
       }
-
-      .an-message-content pre {
+      .an-chat-msg-content pre {
         background: #1a1a2e;
         color: #e5e7eb;
-        padding: 12px;
+        padding: 10px;
         border-radius: 8px;
         overflow-x: auto;
-        margin: 8px 0;
+        margin: 6px 0;
       }
-
-      .an-message-content pre code {
+      .an-chat-msg-content pre code {
         background: none;
         padding: 0;
         color: inherit;
       }
-
-      .an-message-content ul, .an-message-content ol {
-        margin: 8px 0;
-        padding-left: 20px;
+      .an-chat-msg-content ul, .an-chat-msg-content ol {
+        margin: 6px 0;
+        padding-left: 18px;
       }
 
-      .an-message-content li {
-        margin-bottom: 4px;
-      }
-
-      .an-message-content h2, .an-message-content h3, .an-message-content h4 {
-        margin: 12px 0 8px 0;
-        font-weight: 600;
-      }
-
-      .an-typing-indicator {
+      .an-typing {
         display: flex;
         gap: 4px;
         padding: 4px 0;
       }
-
-      .an-typing-indicator span {
-        width: 8px;
-        height: 8px;
+      .an-typing span {
+        width: 7px; height: 7px;
         background: #9ca3af;
         border-radius: 50%;
         animation: an-bounce 1.4s ease-in-out infinite;
       }
-
-      .an-typing-indicator span:nth-child(2) {
-        animation-delay: 0.2s;
-      }
-
-      .an-typing-indicator span:nth-child(3) {
-        animation-delay: 0.4s;
-      }
-
+      .an-typing span:nth-child(2) { animation-delay: 0.2s; }
+      .an-typing span:nth-child(3) { animation-delay: 0.4s; }
       @keyframes an-bounce {
         0%, 60%, 100% { transform: translateY(0); }
         30% { transform: translateY(-4px); }
       }
 
-      .an-modal-footer {
+      .an-chat-input-area {
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
         padding: 16px 20px;
         border-top: 1px solid #e5e7eb;
       }
-
-      .an-input-container {
-        display: flex;
-        gap: 12px;
-        align-items: flex-end;
-      }
-
-      .an-input-container textarea {
+      .an-chat-input-area textarea {
         flex: 1;
-        padding: 12px 16px;
+        padding: 10px 14px;
         border: 1px solid #e5e7eb;
-        border-radius: 12px;
+        border-radius: 10px;
         font-family: inherit;
-        font-size: 14px;
+        font-size: 13px;
         line-height: 1.5;
         resize: none;
-        min-height: 44px;
+        min-height: 40px;
         max-height: 120px;
         transition: border-color 0.15s, box-shadow 0.15s;
+        color: #1a1a2e;
+        background: #fff;
       }
-
-      .an-input-container textarea:focus {
+      .an-chat-input-area textarea:focus {
         outline: none;
         border-color: #2563eb;
-        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
       }
+      .an-chat-input-area textarea::placeholder { color: #9ca3af; }
 
-      .an-input-container textarea::placeholder {
-        color: #9ca3af;
-      }
-
-      .an-send-btn {
+      .an-chat-send-btn {
         background: #2563eb;
         border: none;
-        padding: 12px;
-        border-radius: 12px;
+        padding: 10px;
+        border-radius: 10px;
         cursor: pointer;
         transition: background 0.15s;
         flex-shrink: 0;
       }
-
-      .an-send-btn:hover {
-        background: #1d4ed8;
-      }
-
-      .an-send-btn svg {
-        width: 20px;
-        height: 20px;
-        color: #ffffff;
-      }
+      .an-chat-send-btn:hover { background: #1d4ed8; }
+      .an-chat-send-btn svg { width: 18px; height: 18px; color: #fff; }
     `;
   }
 

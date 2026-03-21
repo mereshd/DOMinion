@@ -1,26 +1,63 @@
 // ArticleNotes Background Service Worker
-// Handles Gemini API communication with streaming
+// Handles Gemini API: article analysis + annotation chat
 
 const GEMINI_MODEL = 'gemini-3.1-pro-preview';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-const SYSTEM_PROMPT = `You are ArticleNotes, an AI assistant that helps users understand articles.
-You have access to the full article content below. Answer questions about it,
-explain concepts, summarize sections, or provide additional context.
-You also have access to Google Search to find supplementary information when needed.
+const ANALYSIS_PROMPT = `Analyze the following article and identify 5-15 sections that need annotation. Use Google Search to verify claims and find additional context.
 
-Be concise but thorough. Use markdown formatting when helpful.
-Reference specific parts of the article when relevant.
+For each annotation, provide:
+- "quote": EXACT verbatim substring from the article (15-100 characters). Must match the article text precisely — copy it character-for-character.
+- "type": One of "fact-check", "jargon", "source", "context"
+  - "fact-check": Verifiable claims, statistics, or potentially misleading statements
+  - "jargon": Technical terms or complex language needing explanation
+  - "source": Analysis of cited sources or references
+  - "context": Important missing context or background information
+- "title": Short label (3-8 words)
+- "explanation": Well-researched explanation (2-4 sentences)
+
+Guidelines:
+- Distribute annotations across the entire article, not just the beginning
+- Prioritize the most impactful and interesting sections
+- Use Google Search to verify factual claims
+- For fact-checks, clearly state whether the claim is accurate, misleading, or unverifiable
+- Each quote must be unique — do not annotate the same text twice
+
+Return ONLY a valid JSON array:
+[{"quote":"...","type":"...","title":"...","explanation":"..."}]
 
 ARTICLE TITLE: {title}
 
 ARTICLE CONTENT:
 {content}`;
 
-// Port-based streaming communication
+const CHAT_SYSTEM_PROMPT = `You are ArticleNotes, an AI research assistant. The user wants to discuss a specific annotated section of an article.
+
+Use Google Search to find additional information when helpful. Be concise but thorough. Use markdown formatting.
+
+ANNOTATION CONTEXT:
+Type: {type}
+Original quote: "{quote}"
+Your analysis: {explanation}
+
+FULL ARTICLE TITLE: {title}
+
+FULL ARTICLE CONTENT:
+{content}`;
+
+// Non-streaming analysis
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'analyze') {
+    handleAnalysis(message)
+      .then(sendResponse)
+      .catch(error => sendResponse({ error: error.message }));
+    return true;
+  }
+});
+
+// Streaming chat via ports
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'article-notes-chat') return;
-
   port.onMessage.addListener((message) => {
     if (message.action === 'chat') {
       handleStreamingChat(port, message);
@@ -28,19 +65,115 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function handleStreamingChat(port, { apiKey, articleContent, articleTitle, conversationHistory }) {
+async function handleAnalysis({ apiKey, articleContent, articleTitle }) {
+  if (!apiKey) return { error: 'API key not provided' };
+  if (!articleContent) return { error: 'No article content available' };
+
+  try {
+    const prompt = ANALYSIS_PROMPT
+      .replace('{title}', articleTitle)
+      .replace('{content}', articleContent);
+
+    const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 8192,
+          topP: 0.95,
+          topK: 40,
+          thinkingConfig: { thinkingLevel: "HIGH" }
+        },
+        tools: [{ googleSearch: {} }],
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { error: errorData.error?.message || `API error: ${response.status}` };
+    }
+
+    const data = await response.json();
+
+    if (data.candidates?.[0]?.finishReason === 'SAFETY') {
+      return { error: 'Response was blocked due to safety filters.' };
+    }
+
+    const parts = data.candidates?.[0]?.content?.parts;
+    if (!parts) return { error: 'No response generated.' };
+
+    let responseText = '';
+    for (const part of parts) {
+      if (part.thought) continue;
+      if (part.text) responseText += part.text;
+    }
+
+    if (!responseText) return { error: 'No response generated.' };
+
+    const annotations = extractJSON(responseText);
+    if (!annotations) return { error: 'Failed to parse annotations. Please try again.' };
+
+    const valid = annotations.filter(a =>
+      a.quote && a.type && a.title && a.explanation &&
+      ['fact-check', 'jargon', 'source', 'context'].includes(a.type)
+    );
+
+    if (valid.length === 0) return { error: 'No valid annotations found.' };
+
+    return { annotations: valid };
+
+  } catch (error) {
+    console.error('Analysis error:', error);
+    return { error: `Failed to analyze article: ${error.message}` };
+  }
+}
+
+function extractJSON(text) {
+  try {
+    const parsed = JSON.parse(text.trim());
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+
+  const codeBlock = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (codeBlock) {
+    try {
+      const parsed = JSON.parse(codeBlock[1].trim());
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+
+  const arrayMatch = text.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    try {
+      const parsed = JSON.parse(arrayMatch[0]);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+
+  return null;
+}
+
+async function handleStreamingChat(port, { apiKey, articleContent, articleTitle, annotation, conversationHistory }) {
   if (!apiKey) {
     port.postMessage({ type: 'error', error: 'API key not provided' });
     return;
   }
 
-  if (!articleContent) {
-    port.postMessage({ type: 'error', error: 'No article content available' });
-    return;
-  }
-
   try {
-    const systemInstruction = SYSTEM_PROMPT
+    const systemInstruction = CHAT_SYSTEM_PROMPT
+      .replace('{type}', annotation.type)
+      .replace('{quote}', annotation.quote)
+      .replace('{explanation}', annotation.explanation)
       .replace('{title}', articleTitle)
       .replace('{content}', articleContent);
 
@@ -56,17 +189,13 @@ async function handleStreamingChat(port, { apiKey, articleContent, articleTitle,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents,
-        systemInstruction: {
-          parts: [{ text: systemInstruction }]
-        },
+        systemInstruction: { parts: [{ text: systemInstruction }] },
         generationConfig: {
           temperature: 0.7,
           maxOutputTokens: 8192,
           topP: 0.95,
           topK: 40,
-          thinkingConfig: {
-            thinkingLevel: "HIGH"
-          }
+          thinkingConfig: { thinkingLevel: "HIGH" }
         },
         tools: [{ googleSearch: {} }],
         safetySettings: [
@@ -80,8 +209,7 @@ async function handleStreamingChat(port, { apiKey, articleContent, articleTitle,
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const errorMessage = errorData.error?.message || `API error: ${response.status}`;
-      port.postMessage({ type: 'error', error: errorMessage });
+      port.postMessage({ type: 'error', error: errorData.error?.message || `API error: ${response.status}` });
       return;
     }
 
@@ -94,13 +222,11 @@ async function handleStreamingChat(port, { apiKey, articleContent, articleTitle,
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-
       const lines = buffer.split('\n');
       buffer = lines.pop();
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
-
         const jsonStr = line.slice(6).trim();
         if (!jsonStr || jsonStr === '[DONE]') continue;
 
@@ -109,7 +235,7 @@ async function handleStreamingChat(port, { apiKey, articleContent, articleTitle,
           const candidate = data.candidates?.[0];
 
           if (candidate?.finishReason === 'SAFETY') {
-            port.postMessage({ type: 'error', error: 'Response was blocked due to safety filters.' });
+            port.postMessage({ type: 'error', error: 'Response blocked by safety filters.' });
             return;
           }
 
@@ -118,20 +244,16 @@ async function handleStreamingChat(port, { apiKey, articleContent, articleTitle,
 
           for (const part of parts) {
             if (part.thought) continue;
-            if (part.text) {
-              port.postMessage({ type: 'chunk', text: part.text });
-            }
+            if (part.text) port.postMessage({ type: 'chunk', text: part.text });
           }
-        } catch (e) {
-          // Skip unparseable SSE lines
-        }
+        } catch (e) {}
       }
     }
 
     port.postMessage({ type: 'done' });
 
   } catch (error) {
-    console.error('Gemini API error:', error);
-    port.postMessage({ type: 'error', error: `Failed to connect to AI: ${error.message}` });
+    console.error('Chat error:', error);
+    port.postMessage({ type: 'error', error: `Failed to connect: ${error.message}` });
   }
 }
