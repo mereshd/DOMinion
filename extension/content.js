@@ -289,13 +289,17 @@
 
     positioned.sort((a, b) => b.position - a.position);
 
+    const highlightedIds = new Set();
     for (const { annotation } of positioned) {
       const mark = findAndHighlight(container, annotation.quote, annotation.id, annotation.type);
       if (mark) {
         highlightElements.push(mark);
         attachHighlightListeners(mark, annotation);
+        highlightedIds.add(annotation.id);
       }
     }
+
+    annotations = annotations.filter(a => highlightedIds.has(a.id));
   }
 
   function findAndHighlight(root, quote, id, type) {
