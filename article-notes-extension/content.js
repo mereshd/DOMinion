@@ -240,7 +240,7 @@
     }
   }
 
-  // Send message to AI
+  // Send message to AI (streaming via port)
   async function sendMessage() {
     const input = shadowRoot.getElementById('an-input');
     const userMessage = input.value.trim();
@@ -251,14 +251,11 @@
     input.value = '';
     input.style.height = 'auto';
 
-    // Add user message to UI
     addMessage(userMessage, 'user');
 
-    // Add loading indicator
     const loadingId = addLoadingMessage();
 
     try {
-      // Get API key
       const result = await chrome.storage.sync.get(['geminiApiKey']);
       if (!result.geminiApiKey) {
         removeLoadingMessage(loadingId);
@@ -267,11 +264,49 @@
         return;
       }
 
-      // Build conversation for API
       conversationHistory.push({ role: 'user', content: userMessage });
 
-      // Send to background script
-      const response = await chrome.runtime.sendMessage({
+      const port = chrome.runtime.connect({ name: 'article-notes-chat' });
+      let fullResponse = '';
+      let streamingEl = null;
+
+      port.onMessage.addListener((msg) => {
+        if (msg.type === 'chunk') {
+          if (!streamingEl) {
+            removeLoadingMessage(loadingId);
+            streamingEl = addStreamingMessage();
+          }
+          fullResponse += msg.text;
+          updateStreamingMessage(streamingEl, fullResponse);
+        } else if (msg.type === 'done') {
+          if (!streamingEl) {
+            removeLoadingMessage(loadingId);
+            addMessage('No response generated. Please try again.', 'assistant', true);
+          } else {
+            conversationHistory.push({ role: 'assistant', content: fullResponse });
+          }
+          isProcessing = false;
+          port.disconnect();
+        } else if (msg.type === 'error') {
+          removeLoadingMessage(loadingId);
+          if (streamingEl) streamingEl.remove();
+          addMessage(`Error: ${msg.error}`, 'assistant', true);
+          isProcessing = false;
+          port.disconnect();
+        }
+      });
+
+      port.onDisconnect.addListener(() => {
+        if (isProcessing) {
+          removeLoadingMessage(loadingId);
+          if (!streamingEl) {
+            addMessage('Connection lost. Please try again.', 'assistant', true);
+          }
+          isProcessing = false;
+        }
+      });
+
+      port.postMessage({
         action: 'chat',
         apiKey: result.geminiApiKey,
         articleContent: articleContent.markdown,
@@ -279,20 +314,11 @@
         conversationHistory: conversationHistory
       });
 
-      removeLoadingMessage(loadingId);
-
-      if (response.error) {
-        addMessage(`Error: ${response.error}`, 'assistant', true);
-      } else {
-        conversationHistory.push({ role: 'assistant', content: response.text });
-        addMessage(response.text, 'assistant');
-      }
     } catch (error) {
       removeLoadingMessage(loadingId);
       addMessage(`Error: ${error.message}`, 'assistant', true);
+      isProcessing = false;
     }
-
-    isProcessing = false;
   }
 
   // Add message to chat
@@ -339,6 +365,25 @@
     if (loadingEl) {
       loadingEl.remove();
     }
+  }
+
+  // Create a message element for streaming content into
+  function addStreamingMessage() {
+    const messagesContainer = shadowRoot.getElementById('an-messages');
+    const messageEl = document.createElement('div');
+    messageEl.className = 'an-message an-assistant';
+    messageEl.innerHTML = `<div class="an-message-content"></div>`;
+    messagesContainer.appendChild(messageEl);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    return messageEl;
+  }
+
+  // Update a streaming message with new content
+  function updateStreamingMessage(messageEl, content) {
+    const contentEl = messageEl.querySelector('.an-message-content');
+    contentEl.innerHTML = parseMarkdown(content);
+    const messagesContainer = shadowRoot.getElementById('an-messages');
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
   }
 
   // Simple markdown parser

@@ -1,12 +1,13 @@
 // ArticleNotes Background Service Worker
-// Handles Gemini API communication
+// Handles Gemini API communication with streaming
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent';
+const GEMINI_MODEL = 'gemini-3.1-pro-preview';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-// System prompt template
 const SYSTEM_PROMPT = `You are ArticleNotes, an AI assistant that helps users understand articles.
 You have access to the full article content below. Answer questions about it,
 explain concepts, summarize sections, or provide additional context.
+You also have access to Google Search to find supplementary information when needed.
 
 Be concise but thorough. Use markdown formatting when helpful.
 Reference specific parts of the article when relevant.
@@ -16,72 +17,63 @@ ARTICLE TITLE: {title}
 ARTICLE CONTENT:
 {content}`;
 
-// Listen for messages from content script
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'chat') {
-    handleChatMessage(message)
-      .then(sendResponse)
-      .catch(error => sendResponse({ error: error.message }));
-    return true; // Keep channel open for async response
-  }
+// Port-based streaming communication
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'article-notes-chat') return;
+
+  port.onMessage.addListener((message) => {
+    if (message.action === 'chat') {
+      handleStreamingChat(port, message);
+    }
+  });
 });
 
-// Handle chat message
-async function handleChatMessage({ apiKey, articleContent, articleTitle, conversationHistory }) {
+async function handleStreamingChat(port, { apiKey, articleContent, articleTitle, conversationHistory }) {
   if (!apiKey) {
-    return { error: 'API key not provided' };
+    port.postMessage({ type: 'error', error: 'API key not provided' });
+    return;
   }
 
   if (!articleContent) {
-    return { error: 'No article content available' };
+    port.postMessage({ type: 'error', error: 'No article content available' });
+    return;
   }
 
   try {
-    // Build the system instruction with article content
     const systemInstruction = SYSTEM_PROMPT
       .replace('{title}', articleTitle)
       .replace('{content}', articleContent);
 
-    // Build conversation contents for Gemini API
     const contents = conversationHistory.map(msg => ({
       role: msg.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: msg.content }]
     }));
 
-    // Make API request
-    const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+    const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:streamGenerateContent?key=${apiKey}&alt=sse`;
+
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: contents,
+        contents,
         systemInstruction: {
           parts: [{ text: systemInstruction }]
         },
         generationConfig: {
           temperature: 0.7,
-          maxOutputTokens: 2048,
+          maxOutputTokens: 8192,
           topP: 0.95,
-          topK: 40
-        },
-        safetySettings: [
-          {
-            category: 'HARM_CATEGORY_HARASSMENT',
-            threshold: 'BLOCK_ONLY_HIGH'
-          },
-          {
-            category: 'HARM_CATEGORY_HATE_SPEECH',
-            threshold: 'BLOCK_ONLY_HIGH'
-          },
-          {
-            category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-            threshold: 'BLOCK_ONLY_HIGH'
-          },
-          {
-            category: 'HARM_CATEGORY_DANGEROUS_CONTENT',
-            threshold: 'BLOCK_ONLY_HIGH'
+          topK: 40,
+          thinkingConfig: {
+            thinkingLevel: "HIGH"
           }
+        },
+        tools: [{ googleSearch: {} }],
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }
         ]
       })
     });
@@ -89,25 +81,57 @@ async function handleChatMessage({ apiKey, articleContent, articleTitle, convers
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       const errorMessage = errorData.error?.message || `API error: ${response.status}`;
-      return { error: errorMessage };
+      port.postMessage({ type: 'error', error: errorMessage });
+      return;
     }
 
-    const data = await response.json();
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-    // Extract the response text
-    if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
-      return { text: data.candidates[0].content.parts[0].text };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr || jsonStr === '[DONE]') continue;
+
+        try {
+          const data = JSON.parse(jsonStr);
+          const candidate = data.candidates?.[0];
+
+          if (candidate?.finishReason === 'SAFETY') {
+            port.postMessage({ type: 'error', error: 'Response was blocked due to safety filters.' });
+            return;
+          }
+
+          const parts = candidate?.content?.parts;
+          if (!parts) continue;
+
+          for (const part of parts) {
+            if (part.thought) continue;
+            if (part.text) {
+              port.postMessage({ type: 'chunk', text: part.text });
+            }
+          }
+        } catch (e) {
+          // Skip unparseable SSE lines
+        }
+      }
     }
 
-    // Check for blocked content
-    if (data.candidates && data.candidates[0]?.finishReason === 'SAFETY') {
-      return { error: 'Response was blocked due to safety filters.' };
-    }
-
-    return { error: 'No response generated. Please try again.' };
+    port.postMessage({ type: 'done' });
 
   } catch (error) {
     console.error('Gemini API error:', error);
-    return { error: `Failed to connect to AI: ${error.message}` };
+    port.postMessage({ type: 'error', error: `Failed to connect to AI: ${error.message}` });
   }
 }
