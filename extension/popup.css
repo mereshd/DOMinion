@@ -1,4 +1,4 @@
-/* DOMinion — Clean Minimal Design */
+/* DOMinion — Clean Design with Definition */
 /* Palette: cream #FFFDF5, yellow #F9E547, coral #FF6B6B, ink #1A1A1A, lilac #C4B5FD */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -18,7 +18,7 @@ body {
 .popup-header {
   text-align: center;
   padding: 22px 20px 16px;
-  border-bottom: 1px solid rgba(26,26,26,0.08);
+  border-bottom: 1.5px solid rgba(26,26,26,0.1);
 }
 
 .popup-header h1 {
@@ -26,6 +26,7 @@ body {
   font-weight: 700;
   color: #1A1A1A;
   line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 
 .popup-header h1 span {
@@ -39,6 +40,7 @@ body {
   font-weight: 500;
   color: #1A1A1A;
   opacity: 0.45;
+  margin-top: 2px;
 }
 
 /* ===== Main ===== */
@@ -56,8 +58,9 @@ body {
   gap: 12px;
   padding: 16px;
   background: #fff;
-  border: 1px solid rgba(26,26,26,0.1);
+  border: 1.5px solid rgba(26,26,26,0.12);
   border-radius: 10px;
+  box-shadow: 3px 3px 0 rgba(26,26,26,0.04);
 }
 
 .field {
@@ -67,12 +70,12 @@ body {
 }
 
 .field label {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   color: #1A1A1A;
-  opacity: 0.55;
+  opacity: 0.5;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 .input-group {
@@ -83,7 +86,7 @@ body {
 .input-group input {
   flex: 1;
   padding: 9px 12px;
-  border: 1px solid rgba(26,26,26,0.15);
+  border: 1.5px solid rgba(26,26,26,0.16);
   border-radius: 8px;
   font-size: 13px;
   font-family: inherit;
@@ -95,8 +98,8 @@ body {
 
 .input-group input:focus {
   outline: none;
-  border-color: #C4B5FD;
-  box-shadow: 0 0 0 3px rgba(196,181,253,0.25);
+  border-color: #B0A0F0;
+  box-shadow: 0 0 0 3px rgba(176,155,253,0.2);
 }
 
 .input-group input::placeholder {
@@ -106,14 +109,17 @@ body {
 
 .input-group button {
   padding: 8px 10px;
-  border: 1px solid rgba(26,26,26,0.15);
+  border: 1.5px solid rgba(26,26,26,0.16);
   border-radius: 8px;
   background: #FFFDF5;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, box-shadow 0.15s;
 }
 
-.input-group button:hover { background: rgba(26,26,26,0.04); }
+.input-group button:hover {
+  background: rgba(26,26,26,0.04);
+  box-shadow: 2px 2px 0 rgba(26,26,26,0.04);
+}
 
 .input-group button svg {
   width: 16px;
@@ -125,7 +131,7 @@ body {
 .field select {
   width: 100%;
   padding: 9px 12px;
-  border: 1px solid rgba(26,26,26,0.15);
+  border: 1.5px solid rgba(26,26,26,0.16);
   border-radius: 8px;
   font-size: 13px;
   font-family: inherit;
@@ -143,15 +149,15 @@ body {
 
 .field select:focus {
   outline: none;
-  border-color: #C4B5FD;
-  box-shadow: 0 0 0 3px rgba(196,181,253,0.25);
+  border-color: #B0A0F0;
+  box-shadow: 0 0 0 3px rgba(176,155,253,0.2);
 }
 
 .hidden { display: none; }
 
 .status {
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   min-height: 16px;
 }
 .status.success { color: #059669; }
@@ -178,15 +184,22 @@ body {
 .btn-primary {
   background: #F9E547;
   color: #1A1A1A;
-  border: 1px solid rgba(26,26,26,0.1);
+  border: 1.5px solid rgba(26,26,26,0.12);
+  box-shadow: 3px 3px 0 rgba(26,26,26,0.07);
 }
 .btn-primary:hover:not(:disabled) {
   background: #f7df2e;
-  box-shadow: 0 2px 8px rgba(249,229,71,0.4);
+  box-shadow: 2px 2px 0 rgba(26,26,26,0.1);
+  transform: translate(0.5px, 0.5px);
+}
+.btn-primary:active:not(:disabled) {
+  box-shadow: 1px 1px 0 rgba(26,26,26,0.1);
+  transform: translate(1px, 1px);
 }
 .btn-primary:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+  box-shadow: none;
 }
 .btn-primary svg { color: #1A1A1A; }
 
@@ -194,20 +207,29 @@ body {
   background: transparent;
   color: #1A1A1A;
   opacity: 0.6;
-  font-weight: 500;
+  font-weight: 600;
   font-size: 12px;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
 }
-.btn-ghost:hover { opacity: 1; background: rgba(26,26,26,0.04); }
+.btn-ghost:hover {
+  opacity: 1;
+  background: rgba(26,26,26,0.04);
+  border-color: rgba(26,26,26,0.08);
+}
 
 .btn-outline-danger {
   background: transparent;
   color: #FF6B6B;
-  border: 1px solid rgba(255,107,107,0.3);
+  border: 1.5px solid rgba(255,107,107,0.35);
   font-size: 12px;
+  box-shadow: 2px 2px 0 rgba(255,107,107,0.06);
 }
 .btn-outline-danger:hover {
   background: rgba(255,107,107,0.08);
   border-color: #FF6B6B;
+  box-shadow: 1px 1px 0 rgba(255,107,107,0.1);
+  transform: translate(0.5px, 0.5px);
 }
 .btn-outline-danger svg { color: #FF6B6B; }
 
