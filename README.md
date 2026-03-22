@@ -6,6 +6,10 @@
 
 AI-powered Chrome extension that analyzes web articles and annotates them inline with fact-checks, context, explanations, and source analysis.
 
+## Demo
+
+[![DOMinion Demo](https://img.youtube.com/vi/eSXUzZdpvdc/maxresdefault.jpg)](https://www.youtube.com/watch?v=eSXUzZdpvdc&t=1s)
+
 ## Features
 
 - **Smart Highlights** — Automatically identifies claims, jargon, sources, and missing context in any article
@@ -15,7 +19,7 @@ AI-powered Chrome extension that analyzes web articles and annotates them inline
 - **Annotations TOC** — Floating table of contents listing all annotations with click-to-scroll
 - **Persistent Cache** — Annotations, chat history, and user highlights survive page refresh and browser restart
 - **Dismiss & Clear** — Remove individual annotations or clear all at once
-- **Model Selection** — Choose between Flash Lite (fast) and Pro (thorough) Gemini models
+- **Multi-Provider Support** — Choose between Gemini, OpenAI, and Claude with per-provider model selection
 
 ## Setup
 
@@ -24,14 +28,14 @@ AI-powered Chrome extension that analyzes web articles and annotates them inline
 3. Enable **Developer mode** (top right)
 4. Click **Load unpacked** and select the **repository root** (the folder that contains `manifest.json`, not `extension/` alone)
 5. Click the DOMinion icon in the toolbar
-6. Enter your [Gemini API key](https://aistudio.google.com/app/apikey) and save
+6. Select a provider (Gemini, OpenAI, or Claude), enter your API key, and save
 7. Navigate to any article and click **Annotate This Page**
 
 ## Tech Stack
 
 - Chrome Extension Manifest V3
-- Gemini API (gemini-3.1-pro-preview / gemini-3.1-flash-lite-preview)
-- Google Search grounding + thinking mode
+- Multi-provider AI support: Gemini, OpenAI, and Anthropic (Claude) APIs
+- Google Search grounding for Gemini models
 - Turndown.js for HTML-to-Markdown extraction
 - Shadow DOM for style-isolated overlay UI
 - `chrome.storage.local` for annotation persistence
@@ -42,10 +46,10 @@ AI-powered Chrome extension that analyzes web articles and annotates them inline
 manifest.json        Extension manifest (Chrome loads the repo root)
 assets/              Shared assets (e.g. dominion_fig_logo.webp for web_accessible_resources)
 extension/           Extension scripts, popup, icons, and bundled libraries
-  background.js      Gemini API service worker
+  background.js      Multi-provider API service worker
   content.js         Annotations, tooltips, chat, TOC, persistence
   content.css        Inline highlight styles
   popup.html/css/js  Extension popup UI
   turndown.js        HTML-to-Markdown converter
-  icons/             Extension icons
+  icons/             Extension icons + provider logos
 ```

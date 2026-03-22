@@ -28,6 +28,26 @@
   let isAnalyzing = false;
   let highlightElements = [];
 
+  const DEFAULT_MODELS = {
+    gemini: 'gemini-3.1-flash-lite-preview',
+    openai: 'gpt-5.4-nano',
+    claude: 'claude-haiku-4-5'
+  };
+
+  async function getProviderSettings() {
+    const keys = [
+      'provider',
+      'geminiApiKey', 'geminiModel',
+      'openaiApiKey', 'openaiModel',
+      'claudeApiKey', 'claudeModel'
+    ];
+    const result = await chrome.storage.sync.get(keys);
+    const provider = result.provider || 'gemini';
+    const apiKey = result[`${provider}ApiKey`] || '';
+    const model = result[`${provider}Model`] || DEFAULT_MODELS[provider];
+    return { provider, apiKey, model };
+  }
+
   // Overlay UI (shadow DOM)
   let overlayContainer = null;
   let overlayShadow = null;
@@ -222,8 +242,8 @@
     try {
       articleContent = extractArticleContent();
 
-      const result = await chrome.storage.sync.get(['geminiApiKey', 'geminiModel']);
-      if (!result.geminiApiKey) {
+      const settings = await getProviderSettings();
+      if (!settings.apiKey) {
         showStatus('Please set your API key in the extension popup.', true);
         isAnalyzing = false;
         return;
@@ -231,8 +251,9 @@
 
       const response = await chrome.runtime.sendMessage({
         action: 'analyze',
-        apiKey: result.geminiApiKey,
-        model: result.geminiModel || 'gemini-3.1-flash-lite-preview',
+        provider: settings.provider,
+        apiKey: settings.apiKey,
+        model: settings.model,
         articleContent: articleContent.markdown,
         articleTitle: articleContent.title
       });
@@ -642,8 +663,8 @@
     const loadingEl = addChatLoading();
 
     try {
-      const result = await chrome.storage.sync.get(['geminiApiKey', 'geminiModel']);
-      if (!result.geminiApiKey) {
+      const settings = await getProviderSettings();
+      if (!settings.apiKey) {
         if (loadingEl) loadingEl.remove();
         addChatMessage('Please set your API key in the extension popup.', 'assistant', true);
         isChatProcessing = false;
@@ -696,8 +717,9 @@
 
       port.postMessage({
         action: 'chat',
-        apiKey: result.geminiApiKey,
-        model: result.geminiModel || 'gemini-3.1-flash-lite-preview',
+        provider: settings.provider,
+        apiKey: settings.apiKey,
+        model: settings.model,
         articleContent: articleContent.markdown,
         articleTitle: articleContent.title,
         annotation: currentChatAnnotation,
@@ -900,8 +922,8 @@
     showStatus('Analyzing selection\u2026');
 
     try {
-      const result = await chrome.storage.sync.get(['geminiApiKey', 'geminiModel']);
-      if (!result.geminiApiKey) {
+      const settings = await getProviderSettings();
+      if (!settings.apiKey) {
         showStatus('Please set your API key in the extension popup.', true);
         isSelectionAnalyzing = false;
         return;
@@ -909,8 +931,9 @@
 
       const response = await chrome.runtime.sendMessage({
         action: 'analyzeSelection',
-        apiKey: result.geminiApiKey,
-        model: result.geminiModel || 'gemini-3.1-flash-lite-preview',
+        provider: settings.provider,
+        apiKey: settings.apiKey,
+        model: settings.model,
         selectedText: selectedText,
         annotationType: annotationType,
         articleContent: articleContent.markdown,
